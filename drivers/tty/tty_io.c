@@ -105,6 +105,7 @@
 
 #include <linux/kmod.h>
 #include <linux/nsproxy.h>
+#include <linux/vs_pid.h>
 
 #undef TTY_DEBUG_HANGUP
 
@@ -2080,7 +2081,8 @@ static int tiocsti(struct tty_struct *tty, char __user *p)
 	char ch, mbz = 0;
 	struct tty_ldisc *ld;
 
-	if ((current->signal->tty != tty) && !capable(CAP_SYS_ADMIN))
+	if (((current->signal->tty != tty) &&
+		!vx_capable(CAP_SYS_ADMIN, VXC_TIOCSTI)))
 		return -EPERM;
 	if (get_user(ch, p))
 		return -EFAULT;
@@ -2368,6 +2370,7 @@ static int tiocspgrp(struct tty_struct *tty, struct tty_struct *real_tty, pid_t 
 		return -ENOTTY;
 	if (get_user(pgrp_nr, p))
 		return -EFAULT;
+	pgrp_nr = vx_rmap_pid(pgrp_nr);
 	if (pgrp_nr < 0)
 		return -EINVAL;
 	rcu_read_lock();
@@ -3240,7 +3243,7 @@ EXPORT_SYMBOL_GPL(get_current_tty);
 
 void tty_default_fops(struct file_operations *fops)
 {
-	*fops = tty_fops;
+	memcpy((void *)fops, &tty_fops, sizeof(tty_fops));
 }
 
 /*

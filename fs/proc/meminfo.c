@@ -39,7 +39,8 @@ static int meminfo_proc_show(struct seq_file *m, void *v)
 	allowed = ((totalram_pages - hugetlb_total_pages())
 		* sysctl_overcommit_ratio / 100) + total_swap_pages;
 
-	cached = global_page_state(NR_FILE_PAGES) -
+	cached = vx_flags(VXF_VIRT_MEM, 0) ?
+		vx_vsi_cached(&i) : global_page_state(NR_FILE_PAGES) -
 			total_swapcache_pages - i.bufferram;
 	if (cached < 0)
 		cached = 0;
@@ -158,7 +159,7 @@ static int meminfo_proc_show(struct seq_file *m, void *v)
 		vmi.used >> 10,
 		vmi.largest_chunk >> 10
 #ifdef CONFIG_MEMORY_FAILURE
-		,atomic_long_read(&mce_bad_pages) << (PAGE_SHIFT - 10)
+		,atomic_long_read_unchecked(&mce_bad_pages) << (PAGE_SHIFT - 10)
 #endif
 #ifdef CONFIG_TRANSPARENT_HUGEPAGE
 		,K(global_page_state(NR_ANON_TRANSPARENT_HUGEPAGES) *

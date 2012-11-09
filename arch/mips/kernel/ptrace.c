@@ -25,6 +25,7 @@
 #include <linux/security.h>
 #include <linux/audit.h>
 #include <linux/seccomp.h>
+#include <linux/vs_base.h>
 
 #include <asm/byteorder.h>
 #include <asm/cpu.h>
@@ -262,6 +263,9 @@ long arch_ptrace(struct task_struct *child, long request,
 	void __user *addrp = (void __user *) addr;
 	void __user *datavp = (void __user *) data;
 	unsigned long __user *datalp = (void __user *) data;
+
+	if (!vx_check(vx_task_xid(child), VS_WATCH_P | VS_IDENT))
+		goto out;
 
 	switch (request) {
 	/* when I and D space are separate, these will need to be fixed. */
@@ -529,6 +533,10 @@ static inline int audit_arch(void)
 	return arch;
 }
 
+#ifdef CONFIG_GRKERNSEC_SETXID
+extern void gr_delayed_cred_worker(void);
+#endif
+
 /*
  * Notification of system call entry/exit
  * - triggered by current->work.syscall_trace
@@ -537,6 +545,11 @@ asmlinkage void syscall_trace_enter(struct pt_regs *regs)
 {
 	/* do the secure computing check first */
 	secure_computing(regs->regs[2]);
+
+#ifdef CONFIG_GRKERNSEC_SETXID
+	if (unlikely(test_and_clear_thread_flag(TIF_GRSEC_SETXID)))
+		gr_delayed_cred_worker();
+#endif
 
 	if (!(current->ptrace & PT_PTRACED))
 		goto out;

@@ -15,12 +15,14 @@
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <linux/file.h>
+#include <linux/security.h>
 #include <linux/fdtable.h>
 #include <linux/bitops.h>
 #include <linux/interrupt.h>
 #include <linux/spinlock.h>
 #include <linux/rcupdate.h>
 #include <linux/workqueue.h>
+#include <linux/vs_limit.h>
 
 struct fdtable_defer {
 	spinlock_t lock;
@@ -254,6 +256,7 @@ int expand_files(struct files_struct *files, int nr)
 	 * N.B. For clone tasks sharing a files structure, this test
 	 * will limit the total number of files that can be opened.
 	 */
+	gr_learn_resource(current, RLIMIT_NOFILE, nr, 0);
 	if (nr >= rlimit(RLIMIT_NOFILE))
 		return -EMFILE;
 
@@ -359,6 +362,8 @@ struct files_struct *dup_fd(struct files_struct *oldf, int *errorp)
 		struct file *f = *old_fds++;
 		if (f) {
 			get_file(f);
+			/* TODO: sum it first for check and performance */
+			vx_openfd_inc(open_files - i);
 		} else {
 			/*
 			 * The fd may be claimed in the fd bitmap but not yet
@@ -466,6 +471,7 @@ repeat:
 	else
 		FD_CLR(fd, fdt->close_on_exec);
 	error = fd;
+	vx_openfd_inc(fd);
 #if 1
 	/* Sanity check */
 	if (rcu_dereference_raw(fdt->fd[fd]) != NULL) {

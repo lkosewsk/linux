@@ -39,6 +39,8 @@
 #include <linux/nsproxy.h>
 #include <linux/mount.h>
 #include <linux/ipc_namespace.h>
+#include <linux/vs_context.h>
+#include <linux/vs_limit.h>
 
 #include <asm/uaccess.h>
 
@@ -67,6 +69,14 @@ static void shm_close(struct vm_area_struct *vma);
 static void shm_destroy (struct ipc_namespace *ns, struct shmid_kernel *shp);
 #ifdef CONFIG_PROC_FS
 static int sysvipc_shm_proc_show(struct seq_file *s, void *it);
+#endif
+
+#ifdef CONFIG_GRKERNSEC
+extern int gr_handle_shmat(const pid_t shm_cprid, const pid_t shm_lapid,
+			   const time_t shm_createtime, const uid_t cuid,
+			   const int shmid);
+extern int gr_chroot_shmat(const pid_t shm_cprid, const pid_t shm_lapid,
+			   const time_t shm_createtime);
 #endif
 
 void shm_init_ns(struct ipc_namespace *ns)
@@ -187,7 +197,12 @@ static void shm_open(struct vm_area_struct *vma)
  */
 static void shm_destroy(struct ipc_namespace *ns, struct shmid_kernel *shp)
 {
-	ns->shm_tot -= (shp->shm_segsz + PAGE_SIZE - 1) >> PAGE_SHIFT;
+	struct vx_info *vxi = lookup_vx_info(shp->shm_perm.xid);
+	int numpages = (shp->shm_segsz + PAGE_SIZE - 1) >> PAGE_SHIFT;
+
+	vx_ipcshm_sub(vxi, shp, numpages);
+	ns->shm_tot -= numpages;
+
 	shm_rmid(ns, shp);
 	shm_unlock(shp);
 	if (!is_file_hugepages(shp->shm_file))
@@ -197,6 +212,7 @@ static void shm_destroy(struct ipc_namespace *ns, struct shmid_kernel *shp)
 						shp->mlock_user);
 	fput (shp->shm_file);
 	security_shm_free(shp);
+	put_vx_info(vxi);
 	ipc_rcu_putref(shp);
 }
 
@@ -462,11 +478,15 @@ static int newseg(struct ipc_namespace *ns, struct ipc_params *params)
 	if (ns->shm_tot + numpages > ns->shm_ctlall)
 		return -ENOSPC;
 
+	if (!vx_ipcshm_avail(current_vx_info(), numpages))
+		return -ENOSPC;
+
 	shp = ipc_rcu_alloc(sizeof(*shp));
 	if (!shp)
 		return -ENOMEM;
 
 	shp->shm_perm.key = key;
+	shp->shm_perm.xid = vx_current_xid();
 	shp->shm_perm.mode = (shmflg & S_IRWXUGO);
 	shp->mlock_user = NULL;
 
@@ -508,6 +528,14 @@ static int newseg(struct ipc_namespace *ns, struct ipc_params *params)
 	shp->shm_lprid = 0;
 	shp->shm_atim = shp->shm_dtim = 0;
 	shp->shm_ctim = get_seconds();
+#ifdef CONFIG_GRKERNSEC
+	{
+		struct timespec timeval;
+		do_posix_clock_monotonic_gettime(&timeval);
+
+		shp->shm_createtime = timeval.tv_sec;
+	}
+#endif
 	shp->shm_segsz = size;
 	shp->shm_nattch = 0;
 	shp->shm_file = file;
@@ -521,6 +549,7 @@ static int newseg(struct ipc_namespace *ns, struct ipc_params *params)
 	ns->shm_tot += numpages;
 	error = shp->shm_perm.id;
 	shm_unlock(shp);
+	vx_ipcshm_add(current_vx_info(), key, numpages);
 	return error;
 
 no_id:
@@ -559,17 +588,18 @@ static inline int shm_more_checks(struct kern_ipc_perm *ipcp,
 	return 0;
 }
 
+static struct ipc_ops shm_ops = {
+	.getnew		= newseg,
+	.associate	= shm_security,
+	.more_checks	= shm_more_checks
+};
+
 SYSCALL_DEFINE3(shmget, key_t, key, size_t, size, int, shmflg)
 {
 	struct ipc_namespace *ns;
-	struct ipc_ops shm_ops;
 	struct ipc_params shm_params;
 
 	ns = current->nsproxy->ipc_ns;
-
-	shm_ops.getnew = newseg;
-	shm_ops.associate = shm_security;
-	shm_ops.more_checks = shm_more_checks;
 
 	shm_params.key = key;
 	shm_params.flg = shmflg;
@@ -988,6 +1018,12 @@ long do_shmat(int shmid, char __user *shmaddr, int shmflg, ulong *raddr)
 		f_mode = FMODE_READ | FMODE_WRITE;
 	}
 	if (shmflg & SHM_EXEC) {
+
+#ifdef CONFIG_PAX_MPROTECT
+		if (current->mm->pax_flags & MF_PAX_MPROTECT)
+			goto out;
+#endif
+
 		prot |= PROT_EXEC;
 		acc_mode |= S_IXUGO;
 	}
@@ -1011,9 +1047,21 @@ long do_shmat(int shmid, char __user *shmaddr, int shmflg, ulong *raddr)
 	if (err)
 		goto out_unlock;
 
+#ifdef CONFIG_GRKERNSEC
+	if (!gr_handle_shmat(shp->shm_cprid, shp->shm_lapid, shp->shm_createtime,
+			     shp->shm_perm.cuid, shmid) ||
+	    !gr_chroot_shmat(shp->shm_cprid, shp->shm_lapid, shp->shm_createtime)) {
+		err = -EACCES;
+		goto out_unlock;
+	}
+#endif
+
 	path = shp->shm_file->f_path;
 	path_get(&path);
 	shp->shm_nattch++;
+#ifdef CONFIG_GRKERNSEC
+	shp->shm_lapid = current->pid;
+#endif
 	size = i_size_read(path.dentry->d_inode);
 	shm_unlock(shp);
 

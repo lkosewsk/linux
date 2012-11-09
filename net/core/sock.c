@@ -127,6 +127,10 @@
 #include <net/cls_cgroup.h>
 
 #include <linux/filter.h>
+#include <linux/vs_socket.h>
+#include <linux/vs_limit.h>
+#include <linux/vs_context.h>
+#include <linux/vs_network.h>
 
 #include <trace/events/sock.h>
 
@@ -289,7 +293,7 @@ int sock_queue_rcv_skb(struct sock *sk, struct sk_buff *skb)
 	struct sk_buff_head *list = &sk->sk_receive_queue;
 
 	if (atomic_read(&sk->sk_rmem_alloc) >= sk->sk_rcvbuf) {
-		atomic_inc(&sk->sk_drops);
+		atomic_inc_unchecked(&sk->sk_drops);
 		trace_sock_rcvqueue_full(sk, skb);
 		return -ENOMEM;
 	}
@@ -299,7 +303,7 @@ int sock_queue_rcv_skb(struct sock *sk, struct sk_buff *skb)
 		return err;
 
 	if (!sk_rmem_schedule(sk, skb->truesize)) {
-		atomic_inc(&sk->sk_drops);
+		atomic_inc_unchecked(&sk->sk_drops);
 		return -ENOBUFS;
 	}
 
@@ -319,7 +323,7 @@ int sock_queue_rcv_skb(struct sock *sk, struct sk_buff *skb)
 	skb_dst_force(skb);
 
 	spin_lock_irqsave(&list->lock, flags);
-	skb->dropcount = atomic_read(&sk->sk_drops);
+	skb->dropcount = atomic_read_unchecked(&sk->sk_drops);
 	__skb_queue_tail(list, skb);
 	spin_unlock_irqrestore(&list->lock, flags);
 
@@ -339,7 +343,7 @@ int sk_receive_skb(struct sock *sk, struct sk_buff *skb, const int nested)
 	skb->dev = NULL;
 
 	if (sk_rcvqueues_full(sk, skb)) {
-		atomic_inc(&sk->sk_drops);
+		atomic_inc_unchecked(&sk->sk_drops);
 		goto discard_and_relse;
 	}
 	if (nested)
@@ -357,7 +361,7 @@ int sk_receive_skb(struct sock *sk, struct sk_buff *skb, const int nested)
 		mutex_release(&sk->sk_lock.dep_map, 1, _RET_IP_);
 	} else if (sk_add_backlog(sk, skb)) {
 		bh_unlock_sock(sk);
-		atomic_inc(&sk->sk_drops);
+		atomic_inc_unchecked(&sk->sk_drops);
 		goto discard_and_relse;
 	}
 
@@ -917,7 +921,7 @@ int sock_getsockopt(struct socket *sock, int level, int optname,
 		if (len > sizeof(peercred))
 			len = sizeof(peercred);
 		cred_to_ucred(sk->sk_peer_pid, sk->sk_peer_cred, &peercred);
-		if (copy_to_user(optval, &peercred, len))
+		if (len > sizeof(peercred) || copy_to_user(optval, &peercred, len))
 			return -EFAULT;
 		goto lenout;
 	}
@@ -930,7 +934,7 @@ int sock_getsockopt(struct socket *sock, int level, int optname,
 			return -ENOTCONN;
 		if (lv < len)
 			return -EINVAL;
-		if (copy_to_user(optval, address, len))
+		if (len > sizeof(address) || copy_to_user(optval, address, len))
 			return -EFAULT;
 		goto lenout;
 	}
@@ -963,7 +967,7 @@ int sock_getsockopt(struct socket *sock, int level, int optname,
 
 	if (len > lv)
 		len = lv;
-	if (copy_to_user(optval, &v, len))
+	if (len > sizeof(v) || copy_to_user(optval, &v, len))
 		return -EFAULT;
 lenout:
 	if (put_user(len, optlen))
@@ -1066,6 +1070,8 @@ static struct sock *sk_prot_alloc(struct proto *prot, gfp_t priority,
 			goto out_free_sec;
 		sk_tx_queue_clear(sk);
 	}
+		sock_vx_init(sk);
+		sock_nx_init(sk);
 
 	return sk;
 
@@ -1165,6 +1171,11 @@ static void __sk_free(struct sock *sk)
 		put_cred(sk->sk_peer_cred);
 	put_pid(sk->sk_peer_pid);
 	put_net(sock_net(sk));
+	vx_sock_dec(sk);
+	clr_vx_info(&sk->sk_vx_info);
+	sk->sk_xid = -1;
+	clr_nx_info(&sk->sk_nx_info);
+	sk->sk_nid = -1;
 	sk_prot_free(sk->sk_prot_creator, sk);
 }
 
@@ -1212,6 +1223,8 @@ struct sock *sk_clone(const struct sock *sk, const gfp_t priority)
 
 		/* SANITY */
 		get_net(sock_net(newsk));
+		sock_vx_init(newsk);
+		sock_nx_init(newsk);
 		sk_node_init(&newsk->sk_node);
 		sock_lock_init(newsk);
 		bh_lock_sock(newsk);
@@ -1267,6 +1280,12 @@ struct sock *sk_clone(const struct sock *sk, const gfp_t priority)
 		 */
 		smp_wmb();
 		atomic_set(&newsk->sk_refcnt, 2);
+
+		set_vx_info(&newsk->sk_vx_info, sk->sk_vx_info);
+		newsk->sk_xid = sk->sk_xid;
+		vx_sock_inc(newsk);
+		set_nx_info(&newsk->sk_nx_info, sk->sk_nx_info);
+		newsk->sk_nid = sk->sk_nid;
 
 		/*
 		 * Increment the counter in the same struct proto as the master
@@ -2014,13 +2033,19 @@ void sock_init_data(struct socket *sock, struct sock *sk)
 
 	sk->sk_stamp = ktime_set(-1L, 0);
 
+	set_vx_info(&sk->sk_vx_info, current_vx_info());
+	sk->sk_xid = vx_current_xid();
+	vx_sock_inc(sk);
+	set_nx_info(&sk->sk_nx_info, current_nx_info());
+	sk->sk_nid = nx_current_nid();
+
 	/*
 	 * Before updating sk_refcnt, we must commit prior changes to memory
 	 * (Documentation/RCU/rculist_nulls.txt for details)
 	 */
 	smp_wmb();
 	atomic_set(&sk->sk_refcnt, 1);
-	atomic_set(&sk->sk_drops, 0);
+	atomic_set_unchecked(&sk->sk_drops, 0);
 }
 EXPORT_SYMBOL(sock_init_data);
 

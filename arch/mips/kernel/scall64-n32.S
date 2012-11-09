@@ -53,7 +53,7 @@ NESTED(handle_sysn32, PT_SIZE, sp)
 
 	sd	a3, PT_R26(sp)		# save a3 for syscall restarting
 
-	li	t1, _TIF_SYSCALL_TRACE | _TIF_SYSCALL_AUDIT
+	li	t1, _TIF_SYSCALL_WORK
 	LONG_L	t0, TI_FLAGS($28)	# syscall tracing enabled?
 	and	t0, t1, t0
 	bnez	t0, n32_syscall_trace_entry
@@ -361,7 +361,7 @@ EXPORT(sysn32_call_table)
 	PTR	compat_sys_mq_timedreceive
 	PTR	compat_sys_mq_notify
 	PTR	compat_sys_mq_getsetattr
-	PTR	sys_ni_syscall			/* 6240, sys_vserver */
+	PTR	sys32_vserver			/* 6240 */
 	PTR	compat_sys_waitid
 	PTR	sys_ni_syscall			/* available, was setaltroot */
 	PTR	sys_add_key

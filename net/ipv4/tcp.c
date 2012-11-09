@@ -266,6 +266,7 @@
 #include <linux/crypto.h>
 #include <linux/time.h>
 #include <linux/slab.h>
+#include <linux/in.h>
 
 #include <net/icmp.h>
 #include <net/tcp.h>

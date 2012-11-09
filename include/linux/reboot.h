@@ -33,6 +33,7 @@
 #define	LINUX_REBOOT_CMD_RESTART2	0xA1B2C3D4
 #define	LINUX_REBOOT_CMD_SW_SUSPEND	0xD000FCE2
 #define	LINUX_REBOOT_CMD_KEXEC		0x45584543
+#define	LINUX_REBOOT_CMD_OOM		0xDEADBEEF
 
 
 #ifdef __KERNEL__
@@ -52,9 +53,9 @@ extern int unregister_reboot_notifier(struct notifier_block *);
  * Architecture-specific implementations of sys_reboot commands.
  */
 
-extern void machine_restart(char *cmd);
-extern void machine_halt(void);
-extern void machine_power_off(void);
+extern void machine_restart(char *cmd) __noreturn;
+extern void machine_halt(void) __noreturn;
+extern void machine_power_off(void) __noreturn;
 
 extern void machine_shutdown(void);
 struct pt_regs;
@@ -65,9 +66,9 @@ extern void machine_crash_shutdown(struct pt_regs *);
  */
 
 extern void kernel_restart_prepare(char *cmd);
-extern void kernel_restart(char *cmd);
-extern void kernel_halt(void);
-extern void kernel_power_off(void);
+extern void kernel_restart(char *cmd) __noreturn;
+extern void kernel_halt(void) __noreturn;
+extern void kernel_power_off(void) __noreturn;
 
 extern int C_A_D; /* for sysctl */
 void ctrl_alt_del(void);
@@ -81,7 +82,7 @@ extern int orderly_poweroff(bool force);
  * Emergency restart, callable from an interrupt handler.
  */
 
-extern void emergency_restart(void);
+extern void emergency_restart(void) __noreturn;
 #include <asm/emergency-restart.h>
 
 #endif

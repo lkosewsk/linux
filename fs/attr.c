@@ -14,6 +14,9 @@
 #include <linux/fcntl.h>
 #include <linux/security.h>
 #include <linux/evm.h>
+#include <linux/proc_fs.h>
+#include <linux/devpts_fs.h>
+#include <linux/vs_tag.h>
 
 /**
  * inode_change_ok - check if attribute changes to an inode are allowed
@@ -74,6 +77,10 @@ int inode_change_ok(const struct inode *inode, struct iattr *attr)
 			return -EPERM;
 	}
 
+	/* check for inode tag permission */
+	if (dx_permission(inode, MAY_WRITE))
+		return -EACCES;
+
 	return 0;
 }
 EXPORT_SYMBOL(inode_change_ok);
@@ -99,6 +106,7 @@ int inode_newsize_ok(const struct inode *inode, loff_t offset)
 		unsigned long limit;
 
 		limit = rlimit(RLIMIT_FSIZE);
+		gr_learn_resource(current, RLIMIT_FSIZE, (unsigned long)offset, 1);
 		if (limit != RLIM_INFINITY && offset > limit)
 			goto out_sig;
 		if (offset > inode->i_sb->s_maxbytes)
@@ -144,6 +152,8 @@ void setattr_copy(struct inode *inode, const struct iattr *attr)
 		inode->i_uid = attr->ia_uid;
 	if (ia_valid & ATTR_GID)
 		inode->i_gid = attr->ia_gid;
+	if ((ia_valid & ATTR_TAG) && IS_TAGGED(inode))
+		inode->i_tag = attr->ia_tag;
 	if (ia_valid & ATTR_ATIME)
 		inode->i_atime = timespec_trunc(attr->ia_atime,
 						inode->i_sb->s_time_gran);
@@ -171,7 +181,8 @@ int notify_change(struct dentry * dentry, struct iattr * attr)
 	struct timespec now;
 	unsigned int ia_valid = attr->ia_valid;
 
-	if (ia_valid & (ATTR_MODE | ATTR_UID | ATTR_GID | ATTR_TIMES_SET)) {
+	if (ia_valid & (ATTR_MODE | ATTR_UID | ATTR_GID |
+		ATTR_TAG | ATTR_TIMES_SET)) {
 		if (IS_IMMUTABLE(inode) || IS_APPEND(inode))
 			return -EPERM;
 	}

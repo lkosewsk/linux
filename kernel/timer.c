@@ -40,6 +40,10 @@
 #include <linux/irq_work.h>
 #include <linux/sched.h>
 #include <linux/slab.h>
+#include <linux/vs_base.h>
+#include <linux/vs_cvirt.h>
+#include <linux/vs_pid.h>
+#include <linux/vserver/sched.h>
 
 #include <asm/uaccess.h>
 #include <asm/unistd.h>
@@ -1304,7 +1308,7 @@ void update_process_times(int user_tick)
 /*
  * This function runs timers and the timer-tq in bottom half context.
  */
-static void run_timer_softirq(struct softirq_action *h)
+static void run_timer_softirq(void)
 {
 	struct tvec_base *base = __this_cpu_read(tvec_bases);
 
@@ -1336,12 +1340,6 @@ SYSCALL_DEFINE1(alarm, unsigned int, seconds)
 
 #endif
 
-#ifndef __alpha__
-
-/*
- * The Alpha uses getxpid, getxuid, and getxgid instead.  Maybe this
- * should be moved into arch/i386 instead?
- */
 
 /**
  * sys_getpid - return the thread group id of the current process
@@ -1370,9 +1368,22 @@ SYSCALL_DEFINE0(getppid)
 	rcu_read_lock();
 	pid = task_tgid_vnr(rcu_dereference(current->real_parent));
 	rcu_read_unlock();
-
-	return pid;
+	return vx_map_pid(pid);
 }
+
+#ifdef __alpha__
+
+/*
+ * The Alpha uses getxpid, getxuid, and getxgid instead.
+ */
+
+asmlinkage long do_getxpid(long *ppid)
+{
+	*ppid = sys_getppid();
+	return sys_getpid();
+}
+
+#else /* _alpha_ */
 
 SYSCALL_DEFINE0(getuid)
 {

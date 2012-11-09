@@ -26,6 +26,7 @@
 #include <linux/ima.h>
 #include <linux/cred.h>
 #include <linux/buffer_head.h> /* for inode_has_buffers */
+#include <linux/vs_tag.h>
 #include "internal.h"
 
 /*
@@ -137,6 +138,9 @@ int inode_init_always(struct super_block *sb, struct inode *inode)
 	struct address_space *const mapping = &inode->i_data;
 
 	inode->i_sb = sb;
+
+	/* essential because of inode slab reuse */
+	inode->i_tag = 0;
 	inode->i_blkbits = sb->s_blocksize_bits;
 	inode->i_flags = 0;
 	atomic_set(&inode->i_count, 1);
@@ -158,6 +162,7 @@ int inode_init_always(struct super_block *sb, struct inode *inode)
 	inode->i_bdev = NULL;
 	inode->i_cdev = NULL;
 	inode->i_rdev = 0;
+	inode->i_mdev = 0;
 	inode->dirtied_when = 0;
 
 	if (security_inode_alloc(inode))
@@ -398,6 +403,8 @@ void __insert_inode_hash(struct inode *inode, unsigned long hashval)
 	spin_unlock(&inode_hash_lock);
 }
 EXPORT_SYMBOL(__insert_inode_hash);
+
+EXPORT_SYMBOL_GPL(__iget);
 
 /**
  *	__remove_inode_hash - remove an inode from the hash
@@ -787,8 +794,8 @@ unsigned int get_next_ino(void)
 
 #ifdef CONFIG_SMP
 	if (unlikely((res & (LAST_INO_BATCH-1)) == 0)) {
-		static atomic_t shared_last_ino;
-		int next = atomic_add_return(LAST_INO_BATCH, &shared_last_ino);
+		static atomic_unchecked_t shared_last_ino;
+		int next = atomic_add_return_unchecked(LAST_INO_BATCH, &shared_last_ino);
 
 		res = next - LAST_INO_BATCH;
 	}
@@ -855,8 +862,7 @@ void lockdep_annotate_inode_mutex_key(struct inode *inode)
 		struct file_system_type *type = inode->i_sb->s_type;
 
 		/* Set new key only if filesystem hasn't already changed it */
-		if (!lockdep_match_class(&inode->i_mutex,
-		    &type->i_mutex_key)) {
+		if (lockdep_match_class(&inode->i_mutex, &type->i_mutex_key)) {
 			/*
 			 * ensure nobody is actually holding i_mutex
 			 */
@@ -883,6 +889,7 @@ void unlock_new_inode(struct inode *inode)
 	spin_lock(&inode->i_lock);
 	WARN_ON(!(inode->i_state & I_NEW));
 	inode->i_state &= ~I_NEW;
+	smp_mb();
 	wake_up_bit(&inode->i_state, __I_NEW);
 	spin_unlock(&inode->i_lock);
 }
@@ -1626,9 +1633,11 @@ void init_special_inode(struct inode *inode, umode_t mode, dev_t rdev)
 	if (S_ISCHR(mode)) {
 		inode->i_fop = &def_chr_fops;
 		inode->i_rdev = rdev;
+		inode->i_mdev = rdev;
 	} else if (S_ISBLK(mode)) {
 		inode->i_fop = &def_blk_fops;
 		inode->i_rdev = rdev;
+		inode->i_mdev = rdev;
 	} else if (S_ISFIFO(mode))
 		inode->i_fop = &def_fifo_fops;
 	else if (S_ISSOCK(mode))
@@ -1657,6 +1666,7 @@ void inode_init_owner(struct inode *inode, const struct inode *dir,
 	} else
 		inode->i_gid = current_fsgid();
 	inode->i_mode = mode;
+	inode->i_tag = dx_current_fstag(inode->i_sb);
 }
 EXPORT_SYMBOL(inode_init_owner);
 

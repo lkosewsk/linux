@@ -1,3 +1,4 @@
+.section .rodata,"a",@progbits
 ENTRY(sys_call_table)
 	.long sys_restart_syscall	/* 0 - old "setup()" system call, used for restarting */
 	.long sys_exit
@@ -272,7 +273,7 @@ ENTRY(sys_call_table)
 	.long sys_tgkill	/* 270 */
 	.long sys_utimes
  	.long sys_fadvise64_64
-	.long sys_ni_syscall	/* sys_vserver */
+	.long sys_vserver
 	.long sys_mbind
 	.long sys_get_mempolicy
 	.long sys_set_mempolicy

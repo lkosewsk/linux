@@ -386,7 +386,7 @@ struct reiserfs_sb_info {
 	/* Comment? -Hans */
 	wait_queue_head_t s_wait;
 	/* To be obsoleted soon by per buffer seals.. -Hans */
-	atomic_t s_generation_counter;	// increased by one every time the
+	atomic_unchecked_t s_generation_counter;	// increased by one every time the
 	// tree gets re-balanced
 	unsigned long s_properties;	/* File system properties. Currently holds
 					   on-disk FS format */
@@ -476,6 +476,7 @@ enum reiserfs_mount_options {
 	REISERFS_EXPOSE_PRIVROOT,
 	REISERFS_BARRIER_NONE,
 	REISERFS_BARRIER_FLUSH,
+	REISERFS_TAGGED,
 
 	/* Actions on error */
 	REISERFS_ERROR_PANIC,

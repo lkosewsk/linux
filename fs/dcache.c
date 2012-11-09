@@ -37,6 +37,7 @@
 #include <linux/rculist_bl.h>
 #include <linux/prefetch.h>
 #include <linux/ratelimit.h>
+#include <linux/vs_limit.h>
 #include "internal.h"
 
 /*
@@ -103,11 +104,11 @@ static unsigned int d_hash_shift __read_mostly;
 
 static struct hlist_bl_head *dentry_hashtable __read_mostly;
 
-static inline struct hlist_bl_head *d_hash(struct dentry *parent,
-					unsigned long hash)
+static inline struct hlist_bl_head *d_hash(const struct dentry *parent,
+					unsigned int hash)
 {
-	hash += ((unsigned long) parent ^ GOLDEN_RATIO_PRIME) / L1_CACHE_BYTES;
-	hash = hash ^ ((hash ^ GOLDEN_RATIO_PRIME) >> D_HASHBITS);
+	hash += (unsigned long) parent / L1_CACHE_BYTES;
+	hash = hash + (hash >> D_HASHBITS);
 	return dentry_hashtable + (hash & D_HASHMASK);
 }
 
@@ -539,6 +540,8 @@ int d_invalidate(struct dentry * dentry)
 		spin_lock(&dentry->d_lock);
 	}
 
+	vx_dentry_dec(dentry);
+
 	/*
 	 * Somebody else still using it?
 	 *
@@ -568,6 +571,7 @@ EXPORT_SYMBOL(d_invalidate);
 static inline void __dget_dlock(struct dentry *dentry)
 {
 	dentry->d_count++;
+	vx_dentry_inc(dentry);
 }
 
 static inline void __dget(struct dentry *dentry)
@@ -1192,6 +1196,9 @@ struct dentry *__d_alloc(struct super_block *sb, const struct qstr *name)
 	struct dentry *dentry;
 	char *dname;
 
+	if (!vx_dentry_avail(1))
+		return NULL;
+
 	dentry = kmem_cache_alloc(dentry_cache, GFP_KERNEL);
 	if (!dentry)
 		return NULL;
@@ -1214,6 +1221,7 @@ struct dentry *__d_alloc(struct super_block *sb, const struct qstr *name)
 
 	dentry->d_count = 1;
 	dentry->d_flags = 0;
+	vx_dentry_inc(dentry);
 	spin_lock_init(&dentry->d_lock);
 	seqcount_init(&dentry->d_seq);
 	dentry->d_inode = NULL;
@@ -1872,6 +1880,7 @@ struct dentry *__d_lookup(struct dentry *parent, struct qstr *name)
 		}
 
 		dentry->d_count++;
+		vx_dentry_inc(dentry);
 		found = dentry;
 		spin_unlock(&dentry->d_lock);
 		break;
@@ -3043,7 +3052,7 @@ void __init vfs_caches_init(unsigned long mempages)
 	mempages -= reserve;
 
 	names_cachep = kmem_cache_create("names_cache", PATH_MAX, 0,
-			SLAB_HWCACHE_ALIGN|SLAB_PANIC, NULL);
+			SLAB_HWCACHE_ALIGN|SLAB_PANIC|SLAB_USERCOPY, NULL);
 
 	dcache_init();
 	inode_init();

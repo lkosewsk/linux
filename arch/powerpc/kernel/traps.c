@@ -98,6 +98,8 @@ static void pmac_backlight_unblank(void)
 static inline void pmac_backlight_unblank(void) { }
 #endif
 
+extern void gr_handle_kernel_exploit(void);
+
 int die(const char *str, struct pt_regs *regs, long err)
 {
 	static struct {
@@ -170,6 +172,8 @@ int die(const char *str, struct pt_regs *regs, long err)
 
 	if (panic_on_oops)
 		panic("Fatal exception");
+
+	gr_handle_kernel_exploit();
 
 	oops_exit();
 	do_exit(err);
@@ -1082,8 +1086,9 @@ void nonrecoverable_exception(struct pt_regs *regs)
 
 void trace_syscall(struct pt_regs *regs)
 {
-	printk("Task: %p(%d), PC: %08lX/%08lX, Syscall: %3ld, Result: %s%ld    %s\n",
-	       current, task_pid_nr(current), regs->nip, regs->link, regs->gpr[0],
+	printk("Task: %p(%d[#%u]), PC: %08lX/%08lX, Syscall: %3ld, Result: %s%ld    %s\n",
+	       current, task_pid_nr(current), current->xid,
+	       regs->nip, regs->link, regs->gpr[0],
 	       regs->ccr&0x10000000?"Error=":"", regs->gpr[3], print_tainted());
 }
 

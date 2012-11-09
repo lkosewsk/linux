@@ -128,6 +128,12 @@ extern struct cred init_cred;
 
 #define INIT_TASK_COMM "swapper"
 
+#ifdef CONFIG_X86
+#define INIT_TASK_THREAD_INFO .tinfo = INIT_THREAD_INFO,
+#else
+#define INIT_TASK_THREAD_INFO
+#endif
+
 /*
  *  INIT_TASK is used to set up the first task table, touch at
  * your own risk!. Base=0, limit=0x1fffff (=2MB)
@@ -166,6 +172,7 @@ extern struct cred init_cred;
 	RCU_INIT_POINTER(.cred, &init_cred),				\
 	.comm		= INIT_TASK_COMM,				\
 	.thread		= INIT_THREAD,					\
+	INIT_TASK_THREAD_INFO						\
 	.fs		= &init_fs,					\
 	.files		= &init_files,					\
 	.signal		= &init_signals,				\
@@ -193,6 +200,10 @@ extern struct cred init_cred;
 	INIT_FTRACE_GRAPH						\
 	INIT_TRACE_RECURSION						\
 	INIT_TASK_RCU_PREEMPT(tsk)					\
+	.xid		= 0,						\
+	.vx_info	= NULL,						\
+	.nid		= 0,						\
+	.nx_info	= NULL,						\
 }
 
 

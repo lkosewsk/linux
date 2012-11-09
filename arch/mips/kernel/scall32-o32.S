@@ -52,7 +52,7 @@ NESTED(handle_sys, PT_SIZE, sp)
 
 stack_done:
 	lw	t0, TI_FLAGS($28)	# syscall tracing enabled?
-	li	t1, _TIF_SYSCALL_TRACE | _TIF_SYSCALL_AUDIT
+	li	t1, _TIF_SYSCALL_WORK
 	and	t0, t1
 	bnez	t0, syscall_trace_entry	# -> yes
 
@@ -523,7 +523,7 @@ einval:	li	v0, -ENOSYS
 	sys	sys_mq_timedreceive	5
 	sys	sys_mq_notify		2	/* 4275 */
 	sys	sys_mq_getsetattr	3
-	sys	sys_ni_syscall		0	/* sys_vserver */
+	sys	sys_vserver		3
 	sys	sys_waitid		5
 	sys	sys_ni_syscall		0	/* available, was setaltroot */
 	sys	sys_add_key		5	/* 4280 */

@@ -14,6 +14,7 @@
 #include <linux/init.h>
 #include <linux/mm.h>
 #include <linux/sched.h>
+#include <linux/grsecurity.h>
 #include <linux/syscore_ops.h>
 #include <linux/clocksource.h>
 #include <linux/jiffies.h>
@@ -233,6 +234,7 @@ void getnstimeofday(struct timespec *ts)
 	} while (read_seqretry(&xtime_lock, seq));
 
 	timespec_add_ns(ts, nsecs);
+	vx_adjust_timespec(ts);
 }
 
 EXPORT_SYMBOL(getnstimeofday);
@@ -364,6 +366,8 @@ int do_settimeofday(const struct timespec *tv)
 
 	if ((unsigned long)tv->tv_nsec >= NSEC_PER_SEC)
 		return -EINVAL;
+
+	gr_log_timechange();
 
 	write_seqlock_irqsave(&xtime_lock, flags);
 

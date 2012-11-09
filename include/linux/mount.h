@@ -52,6 +52,9 @@ struct mnt_pcp {
 	int mnt_writers;
 };
 
+#define MNT_TAGID	0x10000
+#define MNT_NOTAG	0x20000
+
 struct vfsmount {
 	struct list_head mnt_hash;
 	struct vfsmount *mnt_parent;	/* fs we are mounted on */
@@ -86,6 +89,7 @@ struct vfsmount {
 	int mnt_expiry_mark;		/* true if marked for expiry */
 	int mnt_pinned;
 	int mnt_ghosts;
+	tag_t mnt_tag;			/* tagging used for vfsmount */
 };
 
 struct file; /* forward dec */

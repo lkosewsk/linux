@@ -81,6 +81,7 @@ aic7*seq.h*
 aicasm
 aicdb.h*
 altivec*.c
+ashldi3.S
 asm-offsets.h
 asm_offsets.h
 autoconf.h*
@@ -218,6 +219,7 @@ series
 setup
 setup.bin
 setup.elf
+size_overflow_hash.h
 sImage
 sm_tbl*
 split-include

@@ -127,6 +127,7 @@
 #include <linux/in.h>
 #include <linux/jhash.h>
 #include <linux/random.h>
+#include <linux/vs_inet.h>
 #include <trace/events/napi.h>
 #include <trace/events/net.h>
 #include <trace/events/skb.h>
@@ -623,7 +624,8 @@ struct net_device *__dev_get_by_name(struct net *net, const char *name)
 	struct hlist_head *head = dev_name_hash(net, name);
 
 	hlist_for_each_entry(dev, p, head, name_hlist)
-		if (!strncmp(dev->name, name, IFNAMSIZ))
+		if (!strncmp(dev->name, name, IFNAMSIZ) &&
+		    nx_dev_visible(current_nx_info(), dev))
 			return dev;
 
 	return NULL;
@@ -649,7 +651,8 @@ struct net_device *dev_get_by_name_rcu(struct net *net, const char *name)
 	struct hlist_head *head = dev_name_hash(net, name);
 
 	hlist_for_each_entry_rcu(dev, p, head, name_hlist)
-		if (!strncmp(dev->name, name, IFNAMSIZ))
+		if (!strncmp(dev->name, name, IFNAMSIZ) &&
+		    nx_dev_visible(current_nx_info(), dev))
 			return dev;
 
 	return NULL;
@@ -700,7 +703,8 @@ struct net_device *__dev_get_by_index(struct net *net, int ifindex)
 	struct hlist_head *head = dev_index_hash(net, ifindex);
 
 	hlist_for_each_entry(dev, p, head, index_hlist)
-		if (dev->ifindex == ifindex)
+		if ((dev->ifindex == ifindex) &&
+		    nx_dev_visible(current_nx_info(), dev))
 			return dev;
 
 	return NULL;
@@ -718,7 +722,7 @@ EXPORT_SYMBOL(__dev_get_by_index);
  *	about locking. The caller must hold RCU lock.
  */
 
-struct net_device *dev_get_by_index_rcu(struct net *net, int ifindex)
+struct net_device *dev_get_by_index_real_rcu(struct net *net, int ifindex)
 {
 	struct hlist_node *p;
 	struct net_device *dev;
@@ -728,6 +732,16 @@ struct net_device *dev_get_by_index_rcu(struct net *net, int ifindex)
 		if (dev->ifindex == ifindex)
 			return dev;
 
+	return NULL;
+}
+EXPORT_SYMBOL(dev_get_by_index_real_rcu);
+
+struct net_device *dev_get_by_index_rcu(struct net *net, int ifindex)
+{
+	struct net_device *dev = dev_get_by_index_real_rcu(net, ifindex);
+
+	if (nx_dev_visible(current_nx_info(), dev))
+		return dev;
 	return NULL;
 }
 EXPORT_SYMBOL(dev_get_by_index_rcu);
@@ -778,7 +792,8 @@ struct net_device *dev_getbyhwaddr_rcu(struct net *net, unsigned short type,
 
 	for_each_netdev_rcu(net, dev)
 		if (dev->type == type &&
-		    !memcmp(dev->dev_addr, ha, dev->addr_len))
+		    !memcmp(dev->dev_addr, ha, dev->addr_len) &&
+		    nx_dev_visible(current_nx_info(), dev))
 			return dev;
 
 	return NULL;
@@ -790,9 +805,11 @@ struct net_device *__dev_getfirstbyhwtype(struct net *net, unsigned short type)
 	struct net_device *dev;
 
 	ASSERT_RTNL();
-	for_each_netdev(net, dev)
-		if (dev->type == type)
+	for_each_netdev(net, dev) {
+		if ((dev->type == type) &&
+		    nx_dev_visible(current_nx_info(), dev))
 			return dev;
+	}
 
 	return NULL;
 }
@@ -909,6 +926,8 @@ static int __dev_alloc_name(struct net *net, const char *name, char *buf)
 			if (!sscanf(d->name, name, &i))
 				continue;
 			if (i < 0 || i >= max_netdevices)
+				continue;
+			if (!nx_dev_visible(current_nx_info(), d))
 				continue;
 
 			/*  avoid cases where sscanf is not exact inverse of printf */
@@ -1139,10 +1158,14 @@ void dev_load(struct net *net, const char *name)
 	if (no_module && capable(CAP_NET_ADMIN))
 		no_module = request_module("netdev-%s", name);
 	if (no_module && capable(CAP_SYS_MODULE)) {
+#ifdef CONFIG_GRKERNSEC_MODHARDEN
+		___request_module(true, "grsec_modharden_netdev", "%s", name);
+#else
 		if (!request_module("%s", name))
 			pr_err("Loading kernel module for a network device "
 "with CAP_SYS_MODULE (deprecated).  Use CAP_NET_ADMIN and alias netdev-%s "
 "instead\n", name);
+#endif
 	}
 }
 EXPORT_SYMBOL(dev_load);
@@ -1593,7 +1616,7 @@ int dev_forward_skb(struct net_device *dev, struct sk_buff *skb)
 {
 	if (skb_shinfo(skb)->tx_flags & SKBTX_DEV_ZEROCOPY) {
 		if (skb_copy_ubufs(skb, GFP_ATOMIC)) {
-			atomic_long_inc(&dev->rx_dropped);
+			atomic_long_inc_unchecked(&dev->rx_dropped);
 			kfree_skb(skb);
 			return NET_RX_DROP;
 		}
@@ -1603,7 +1626,7 @@ int dev_forward_skb(struct net_device *dev, struct sk_buff *skb)
 	nf_reset(skb);
 
 	if (unlikely(!is_skb_forwardable(dev, skb))) {
-		atomic_long_inc(&dev->rx_dropped);
+		atomic_long_inc_unchecked(&dev->rx_dropped);
 		kfree_skb(skb);
 		return NET_RX_DROP;
 	}
@@ -2030,7 +2053,7 @@ static int illegal_highdma(struct net_device *dev, struct sk_buff *skb)
 
 struct dev_gso_cb {
 	void (*destructor)(struct sk_buff *skb);
-};
+} __no_const;
 
 #define DEV_GSO_CB(skb) ((struct dev_gso_cb *)(skb)->cb)
 
@@ -2964,7 +2987,7 @@ enqueue:
 
 	local_irq_restore(flags);
 
-	atomic_long_inc(&skb->dev->rx_dropped);
+	atomic_long_inc_unchecked(&skb->dev->rx_dropped);
 	kfree_skb(skb);
 	return NET_RX_DROP;
 }
@@ -3038,7 +3061,7 @@ int netif_rx_ni(struct sk_buff *skb)
 }
 EXPORT_SYMBOL(netif_rx_ni);
 
-static void net_tx_action(struct softirq_action *h)
+static void net_tx_action(void)
 {
 	struct softnet_data *sd = &__get_cpu_var(softnet_data);
 
@@ -3327,7 +3350,7 @@ ncls:
 	if (pt_prev) {
 		ret = pt_prev->func(skb, skb->dev, pt_prev, orig_dev);
 	} else {
-		atomic_long_inc(&skb->dev->rx_dropped);
+		atomic_long_inc_unchecked(&skb->dev->rx_dropped);
 		kfree_skb(skb);
 		/* Jamal, now you will not able to escape explaining
 		 * me how you were going to use this. :-)
@@ -3892,7 +3915,7 @@ void netif_napi_del(struct napi_struct *napi)
 }
 EXPORT_SYMBOL(netif_napi_del);
 
-static void net_rx_action(struct softirq_action *h)
+static void net_rx_action(void)
 {
 	struct softnet_data *sd = &__get_cpu_var(softnet_data);
 	unsigned long time_limit = jiffies + 2;
@@ -4068,6 +4091,8 @@ static int dev_ifconf(struct net *net, char __user *arg)
 
 	total = 0;
 	for_each_netdev(net, dev) {
+		if (!nx_dev_visible(current_nx_info(), dev))
+			continue;
 		for (i = 0; i < NPROTO; i++) {
 			if (gifconf_list[i]) {
 				int done;
@@ -4169,6 +4194,10 @@ static void dev_seq_printf_stats(struct seq_file *seq, struct net_device *dev)
 {
 	struct rtnl_link_stats64 temp;
 	const struct rtnl_link_stats64 *stats = dev_get_stats(dev, &temp);
+
+	/* device visible inside network context? */
+	if (!nx_dev_visible(current_nx_info(), dev))
+		return;
 
 	seq_printf(seq, "%6s: %7llu %7llu %4llu %4llu %4llu %5llu %10llu %9llu "
 		   "%8llu %7llu %4llu %4llu %4llu %5llu %7llu %10llu\n",
@@ -5918,7 +5947,7 @@ struct rtnl_link_stats64 *dev_get_stats(struct net_device *dev,
 	} else {
 		netdev_stats_to_stats64(storage, &dev->stats);
 	}
-	storage->rx_dropped += atomic_long_read(&dev->rx_dropped);
+	storage->rx_dropped += atomic_long_read_unchecked(&dev->rx_dropped);
 	return storage;
 }
 EXPORT_SYMBOL(dev_get_stats);

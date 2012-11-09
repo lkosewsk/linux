@@ -45,6 +45,7 @@
 #include <linux/syscalls.h>
 #include <linux/kprobes.h>
 #include <linux/user_namespace.h>
+#include <linux/vs_pid.h>
 
 #include <linux/kmsg_dump.h>
 /* Move somewhere else to avoid recompiling? */
@@ -155,9 +156,18 @@ static int set_one_prio(struct task_struct *p, int niceval, int error)
 		goto out;
 	}
 	if (niceval < task_nice(p) && !can_nice(p, niceval)) {
+		if (vx_flags(VXF_IGNEG_NICE, 0))
+			error = 0;
+		else
+			error = -EACCES;
+		goto out;
+	}
+
+	if (gr_handle_chroot_setpriority(p, niceval)) {
 		error = -EACCES;
 		goto out;
 	}
+
 	no_nice = security_task_setnice(p, niceval);
 	if (no_nice) {
 		error = no_nice;
@@ -205,6 +215,8 @@ SYSCALL_DEFINE3(setpriority, int, which, int, who, int, niceval)
 			else
 				pgrp = task_pgrp(current);
 			do_each_pid_thread(pgrp, PIDTYPE_PGID, p) {
+				if (!vx_check(p->xid, VS_ADMIN_P | VS_IDENT))
+					continue;
 				error = set_one_prio(p, niceval, error);
 			} while_each_pid_thread(pgrp, PIDTYPE_PGID, p);
 			break;
@@ -268,6 +280,8 @@ SYSCALL_DEFINE2(getpriority, int, which, int, who)
 			else
 				pgrp = task_pgrp(current);
 			do_each_pid_thread(pgrp, PIDTYPE_PGID, p) {
+				if (!vx_check(p->xid, VS_ADMIN_P | VS_IDENT))
+					continue;
 				niceval = 20 - task_nice(p);
 				if (niceval > retval)
 					retval = niceval;
@@ -418,6 +432,8 @@ EXPORT_SYMBOL_GPL(kernel_power_off);
 
 static DEFINE_MUTEX(reboot_mutex);
 
+long vs_reboot(unsigned int, void __user *);
+
 /*
  * Reboot system call: for obvious reasons only root may call it,
  * and even root needs to set up some magic numbers in the registers
@@ -449,6 +465,9 @@ SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,
 	 */
 	if ((cmd == LINUX_REBOOT_CMD_POWER_OFF) && !pm_power_off)
 		cmd = LINUX_REBOOT_CMD_HALT;
+
+	if (!vx_check(0, VS_ADMIN|VS_WATCH))
+		return vs_reboot(cmd, arg);
 
 	mutex_lock(&reboot_mutex);
 	switch (cmd) {
@@ -572,6 +591,9 @@ SYSCALL_DEFINE2(setregid, gid_t, rgid, gid_t, egid)
 			goto error;
 	}
 
+	if (gr_check_group_change(new->gid, new->egid, -1))
+		goto error;
+
 	if (rgid != (gid_t) -1 ||
 	    (egid != (gid_t) -1 && egid != old->gid))
 		new->sgid = new->egid;
@@ -601,6 +623,10 @@ SYSCALL_DEFINE1(setgid, gid_t, gid)
 	old = current_cred();
 
 	retval = -EPERM;
+
+	if (gr_check_group_change(gid, gid, gid))
+		goto error;
+
 	if (nsown_capable(CAP_SETGID))
 		new->gid = new->egid = new->sgid = new->fsgid = gid;
 	else if (gid == old->gid || gid == old->sgid)
@@ -618,7 +644,7 @@ error:
 /*
  * change the user struct in a credentials set to match the new UID
  */
-static int set_user(struct cred *new)
+int set_user(struct cred *new)
 {
 	struct user_struct *new_user;
 
@@ -688,6 +714,9 @@ SYSCALL_DEFINE2(setreuid, uid_t, ruid, uid_t, euid)
 			goto error;
 	}
 
+	if (gr_check_user_change(new->uid, new->euid, -1))
+		goto error;
+
 	if (new->uid != old->uid) {
 		retval = set_user(new);
 		if (retval < 0)
@@ -732,6 +761,12 @@ SYSCALL_DEFINE1(setuid, uid_t, uid)
 	old = current_cred();
 
 	retval = -EPERM;
+
+	if (gr_check_crash_uid(uid))
+		goto error;
+	if (gr_check_user_change(uid, uid, uid))
+		goto error;
+
 	if (nsown_capable(CAP_SETUID)) {
 		new->suid = new->uid = uid;
 		if (uid != old->uid) {
@@ -785,6 +820,9 @@ SYSCALL_DEFINE3(setresuid, uid_t, ruid, uid_t, euid, uid_t, suid)
 		    suid != old->euid  && suid != old->suid)
 			goto error;
 	}
+
+	if (gr_check_user_change(ruid, euid, -1))
+		goto error;
 
 	if (ruid != (uid_t) -1) {
 		new->uid = ruid;
@@ -850,6 +888,9 @@ SYSCALL_DEFINE3(setresgid, gid_t, rgid, gid_t, egid, gid_t, sgid)
 			goto error;
 	}
 
+	if (gr_check_group_change(rgid, egid, -1))
+		goto error;
+
 	if (rgid != (gid_t) -1)
 		new->gid = rgid;
 	if (egid != (gid_t) -1)
@@ -896,6 +937,9 @@ SYSCALL_DEFINE1(setfsuid, uid_t, uid)
 	old = current_cred();
 	old_fsuid = old->fsuid;
 
+	if (gr_check_user_change(-1, -1, uid))
+		goto error;
+
 	if (uid == old->uid  || uid == old->euid  ||
 	    uid == old->suid || uid == old->fsuid ||
 	    nsown_capable(CAP_SETUID)) {
@@ -906,6 +950,7 @@ SYSCALL_DEFINE1(setfsuid, uid_t, uid)
 		}
 	}
 
+error:
 	abort_creds(new);
 	return old_fsuid;
 
@@ -932,12 +977,16 @@ SYSCALL_DEFINE1(setfsgid, gid_t, gid)
 	if (gid == old->gid  || gid == old->egid  ||
 	    gid == old->sgid || gid == old->fsgid ||
 	    nsown_capable(CAP_SETGID)) {
+		if (gr_check_group_change(-1, -1, gid))
+			goto error;
+
 		if (gid != old_fsgid) {
 			new->fsgid = gid;
 			goto change_okay;
 		}
 	}
 
+error:
 	abort_creds(new);
 	return old_fsgid;
 
@@ -1189,7 +1238,10 @@ static int override_release(char __user *release, int len)
 		}
 		v = ((LINUX_VERSION_CODE >> 8) & 0xff) + 40;
 		snprintf(buf, len, "2.6.%u%s", v, rest);
-		ret = copy_to_user(release, buf, len);
+		if (len > sizeof(buf))
+			ret = -EFAULT;
+		else
+			ret = copy_to_user(release, buf, len);
 	}
 	return ret;
 }
@@ -1243,19 +1295,19 @@ SYSCALL_DEFINE1(olduname, struct oldold_utsname __user *, name)
 		return -EFAULT;
 
 	down_read(&uts_sem);
-	error = __copy_to_user(&name->sysname, &utsname()->sysname,
+	error = __copy_to_user(name->sysname, &utsname()->sysname,
 			       __OLD_UTS_LEN);
 	error |= __put_user(0, name->sysname + __OLD_UTS_LEN);
-	error |= __copy_to_user(&name->nodename, &utsname()->nodename,
+	error |= __copy_to_user(name->nodename, &utsname()->nodename,
 				__OLD_UTS_LEN);
 	error |= __put_user(0, name->nodename + __OLD_UTS_LEN);
-	error |= __copy_to_user(&name->release, &utsname()->release,
+	error |= __copy_to_user(name->release, &utsname()->release,
 				__OLD_UTS_LEN);
 	error |= __put_user(0, name->release + __OLD_UTS_LEN);
-	error |= __copy_to_user(&name->version, &utsname()->version,
+	error |= __copy_to_user(name->version, &utsname()->version,
 				__OLD_UTS_LEN);
 	error |= __put_user(0, name->version + __OLD_UTS_LEN);
-	error |= __copy_to_user(&name->machine, &utsname()->machine,
+	error |= __copy_to_user(name->machine, &utsname()->machine,
 				__OLD_UTS_LEN);
 	error |= __put_user(0, name->machine + __OLD_UTS_LEN);
 	up_read(&uts_sem);
@@ -1273,7 +1325,8 @@ SYSCALL_DEFINE2(sethostname, char __user *, name, int, len)
 	int errno;
 	char tmp[__NEW_UTS_LEN];
 
-	if (!ns_capable(current->nsproxy->uts_ns->user_ns, CAP_SYS_ADMIN))
+	if (!vx_ns_capable(current->nsproxy->uts_ns->user_ns,
+		CAP_SYS_ADMIN, VXC_SET_UTSNAME))
 		return -EPERM;
 
 	if (len < 0 || len > __NEW_UTS_LEN)
@@ -1324,7 +1377,8 @@ SYSCALL_DEFINE2(setdomainname, char __user *, name, int, len)
 	int errno;
 	char tmp[__NEW_UTS_LEN];
 
-	if (!ns_capable(current->nsproxy->uts_ns->user_ns, CAP_SYS_ADMIN))
+	if (!vx_ns_capable(current->nsproxy->uts_ns->user_ns,
+		CAP_SYS_ADMIN, VXC_SET_UTSNAME))
 		return -EPERM;
 	if (len < 0 || len > __NEW_UTS_LEN)
 		return -EINVAL;
@@ -1443,7 +1497,7 @@ int do_prlimit(struct task_struct *tsk, unsigned int resource,
 		/* Keep the capable check against init_user_ns until
 		   cgroups can contain all limits */
 		if (new_rlim->rlim_max > rlim->rlim_max &&
-				!capable(CAP_SYS_RESOURCE))
+			!vx_capable(CAP_SYS_RESOURCE, VXC_SET_RLIMIT))
 			retval = -EPERM;
 		if (!retval)
 			retval = security_task_setrlimit(tsk->group_leader,
@@ -1497,7 +1551,8 @@ static int check_prlimit_permission(struct task_struct *task)
 	     cred->gid == tcred->sgid &&
 	     cred->gid == tcred->gid))
 		return 0;
-	if (ns_capable(tcred->user->user_ns, CAP_SYS_RESOURCE))
+	if (vx_ns_capable(tcred->user->user_ns,
+		CAP_SYS_RESOURCE, VXC_SET_RLIMIT))
 		return 0;
 
 	return -EPERM;
@@ -1720,7 +1775,7 @@ SYSCALL_DEFINE5(prctl, int, option, unsigned long, arg2, unsigned long, arg3,
 			error = get_dumpable(me->mm);
 			break;
 		case PR_SET_DUMPABLE:
-			if (arg2 < 0 || arg2 > 1) {
+			if (arg2 > 1) {
 				error = -EINVAL;
 				break;
 			}

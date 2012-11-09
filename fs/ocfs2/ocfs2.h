@@ -235,11 +235,11 @@ enum ocfs2_vol_state
 
 struct ocfs2_alloc_stats
 {
-	atomic_t moves;
-	atomic_t local_data;
-	atomic_t bitmap_data;
-	atomic_t bg_allocs;
-	atomic_t bg_extends;
+	atomic_unchecked_t moves;
+	atomic_unchecked_t local_data;
+	atomic_unchecked_t bitmap_data;
+	atomic_unchecked_t bg_allocs;
+	atomic_unchecked_t bg_extends;
 };
 
 enum ocfs2_local_alloc_state
@@ -272,6 +272,7 @@ enum ocfs2_mount_options
 						     writes */
 	OCFS2_MOUNT_HB_NONE = 1 << 13, /* No heartbeat */
 	OCFS2_MOUNT_HB_GLOBAL = 1 << 14, /* Global heartbeat */
+	OCFS2_MOUNT_TAGGED = 1 << 15, /* use tagging */
 };
 
 #define OCFS2_OSB_SOFT_RO			0x0001

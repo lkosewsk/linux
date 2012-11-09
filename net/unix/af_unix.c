@@ -114,6 +114,8 @@
 #include <linux/mount.h>
 #include <net/checksum.h>
 #include <linux/security.h>
+#include <linux/vs_context.h>
+#include <linux/vs_limit.h>
 
 static struct hlist_head unix_socket_table[UNIX_HASH_SIZE + 1];
 static DEFINE_SPINLOCK(unix_table_lock);
@@ -258,6 +260,8 @@ static struct sock *__unix_find_socket_byname(struct net *net,
 		if (!net_eq(sock_net(s), net))
 			continue;
 
+		if (!nx_check(s->sk_nid, VS_WATCH_P | VS_IDENT))
+			continue;
 		if (u->addr->len == len &&
 		    !memcmp(u->addr->name, sunname, len))
 			goto found;
@@ -767,6 +771,12 @@ static struct sock *unix_find_other(struct net *net,
 		err = -ECONNREFUSED;
 		if (!S_ISSOCK(inode->i_mode))
 			goto put_fail;
+
+		if (!gr_acl_handle_unix(path.dentry, path.mnt)) {
+			err = -EACCES;
+			goto put_fail;
+		}
+
 		u = unix_find_socket_byinode(inode);
 		if (!u)
 			goto put_fail;
@@ -787,6 +797,13 @@ static struct sock *unix_find_other(struct net *net,
 		if (u) {
 			struct dentry *dentry;
 			dentry = unix_sk(u)->dentry;
+
+			if (!gr_handle_chroot_unix(pid_vnr(u->sk_peer_pid))) {
+				err = -EPERM;
+				sock_put(u);
+				goto fail;
+			}
+
 			if (dentry)
 				touch_atime(unix_sk(u)->mnt, dentry);
 		} else
@@ -869,11 +886,18 @@ static int unix_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len)
 		err = security_path_mknod(&path, dentry, mode, 0);
 		if (err)
 			goto out_mknod_drop_write;
+		if (!gr_acl_handle_mknod(dentry, path.dentry, path.mnt, mode)) {
+			err = -EACCES;
+			goto out_mknod_drop_write;
+		}
 		err = vfs_mknod(path.dentry->d_inode, dentry, mode, 0);
 out_mknod_drop_write:
 		mnt_drop_write(path.mnt);
 		if (err)
 			goto out_mknod_dput;
+
+		gr_handle_create(dentry, path.mnt);
+
 		mutex_unlock(&path.dentry->d_inode->i_mutex);
 		dput(path.dentry);
 		path.dentry = dentry;
@@ -2219,6 +2243,8 @@ static struct sock *unix_seq_idx(struct seq_file *seq, loff_t pos)
 	for (s = first_unix_socket(&iter->i); s; s = next_unix_socket(&iter->i, s)) {
 		if (sock_net(s) != seq_file_net(seq))
 			continue;
+		if (!nx_check(s->sk_nid, VS_WATCH_P | VS_IDENT))
+			continue;
 		if (off == pos)
 			return s;
 		++off;
@@ -2243,7 +2269,8 @@ static void *unix_seq_next(struct seq_file *seq, void *v, loff_t *pos)
 		sk = first_unix_socket(&iter->i);
 	else
 		sk = next_unix_socket(&iter->i, sk);
-	while (sk && (sock_net(sk) != seq_file_net(seq)))
+	while (sk && (sock_net(sk) != seq_file_net(seq) ||
+		!nx_check(sk->sk_nid, VS_WATCH_P | VS_IDENT)))
 		sk = next_unix_socket(&iter->i, sk);
 	return sk;
 }

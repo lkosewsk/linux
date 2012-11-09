@@ -28,6 +28,8 @@
 #include <linux/freezer.h>
 #include <linux/pid_namespace.h>
 #include <linux/nsproxy.h>
+#include <linux/vs_context.h>
+#include <linux/vs_pid.h>
 #define CREATE_TRACE_POINTS
 #include <trace/events/signal.h>
 
@@ -45,12 +47,12 @@ static struct kmem_cache *sigqueue_cachep;
 
 int print_fatal_signals __read_mostly;
 
-static void __user *sig_handler(struct task_struct *t, int sig)
+static __sighandler_t sig_handler(struct task_struct *t, int sig)
 {
 	return t->sighand->action[sig - 1].sa.sa_handler;
 }
 
-static int sig_handler_ignored(void __user *handler, int sig)
+static int sig_handler_ignored(__sighandler_t handler, int sig)
 {
 	/* Is it explicitly or implicitly ignored? */
 	return handler == SIG_IGN ||
@@ -60,7 +62,7 @@ static int sig_handler_ignored(void __user *handler, int sig)
 static int sig_task_ignored(struct task_struct *t, int sig,
 		int from_ancestor_ns)
 {
-	void __user *handler;
+	__sighandler_t handler;
 
 	handler = sig_handler(t, sig);
 
@@ -364,6 +366,9 @@ __sigqueue_alloc(int sig, struct task_struct *t, gfp_t flags, int override_rlimi
 	atomic_inc(&user->sigpending);
 	rcu_read_unlock();
 
+	if (!override_rlimit)
+		gr_learn_resource(t, RLIMIT_SIGPENDING, atomic_read(&user->sigpending), 1);
+
 	if (override_rlimit ||
 	    atomic_read(&user->sigpending) <=
 			task_rlimit(t, RLIMIT_SIGPENDING)) {
@@ -488,7 +493,7 @@ flush_signal_handlers(struct task_struct *t, int force_default)
 
 int unhandled_signal(struct task_struct *tsk, int sig)
 {
-	void __user *handler = tsk->sighand->action[sig-1].sa.sa_handler;
+	__sighandler_t handler = tsk->sighand->action[sig-1].sa.sa_handler;
 	if (is_global_init(tsk))
 		return 1;
 	if (handler != SIG_IGN && handler != SIG_DFL)
@@ -789,8 +794,17 @@ static int check_kill_permission(int sig, struct siginfo *info,
 	struct pid *sid;
 	int error;
 
+	vxdprintk(VXD_CBIT(misc, 7),
+		"check_kill_permission(%d,%p,%p[#%u,%u])",
+		sig, info, t, vx_task_xid(t), t->pid);
+
 	if (!valid_signal(sig))
 		return -EINVAL;
+
+/*	FIXME: needed? if so, why?
+	if ((info != SEND_SIG_NOINFO) &&
+		(is_si_special(info) || !si_fromuser(info)))
+		goto skip;	*/
 
 	if (!si_fromuser(info))
 		return 0;
@@ -815,6 +829,27 @@ static int check_kill_permission(int sig, struct siginfo *info,
 		}
 	}
 
+	/* allow glibc communication via tgkill to other threads in our
+	   thread group */
+	if ((info == SEND_SIG_NOINFO || info->si_code != SI_TKILL ||
+	     sig != (SIGRTMIN+1) || task_tgid_vnr(t) != info->si_pid)
+	    && gr_handle_signal(t, sig))
+		return -EPERM;
+
+	error = -EPERM;
+	if (t->pid == 1 && current->xid)
+		return error;
+
+	error = -ESRCH;
+	/* FIXME: we shouldn't return ESRCH ever, to avoid
+		  loops, maybe ENOENT or EACCES? */
+	if (!vx_check(vx_task_xid(t), VS_WATCH_P | VS_IDENT)) {
+		vxdprintk(current->xid || VXD_CBIT(misc, 7),
+			"signal %d[%p] xid mismatch %p[#%u,%u] xid=#%u",
+			sig, info, t, vx_task_xid(t), t->pid, current->xid);
+		return error;
+	}
+/* skip: */
 	return security_task_kill(t, info, sig, 0);
 }
 
@@ -1165,7 +1200,7 @@ __group_send_sig_info(int sig, struct siginfo *info, struct task_struct *p)
 	return send_signal(sig, info, p, 1);
 }
 
-static int
+int
 specific_send_sig_info(int sig, struct siginfo *info, struct task_struct *t)
 {
 	return send_signal(sig, info, t, 0);
@@ -1202,6 +1237,7 @@ force_sig_info(int sig, struct siginfo *info, struct task_struct *t)
 	unsigned long int flags;
 	int ret, blocked, ignored;
 	struct k_sigaction *action;
+	int is_unhandled = 0;
 
 	spin_lock_irqsave(&t->sighand->siglock, flags);
 	action = &t->sighand->action[sig-1];
@@ -1216,8 +1252,17 @@ force_sig_info(int sig, struct siginfo *info, struct task_struct *t)
 	}
 	if (action->sa.sa_handler == SIG_DFL)
 		t->signal->flags &= ~SIGNAL_UNKILLABLE;
+	if (action->sa.sa_handler == SIG_IGN || action->sa.sa_handler == SIG_DFL)
+		is_unhandled = 1;
 	ret = specific_send_sig_info(sig, info, t);
 	spin_unlock_irqrestore(&t->sighand->siglock, flags);
+
+	/* only deal with unhandled signals, java etc trigger SIGSEGV during
+	   normal operation */
+	if (is_unhandled) {
+		gr_log_signal(sig, !is_si_special(info) ? info->si_addr : NULL, t);
+		gr_handle_crash(t, sig);
+	}
 
 	return ret;
 }
@@ -1285,8 +1330,11 @@ int group_send_sig_info(int sig, struct siginfo *info, struct task_struct *p)
 	ret = check_kill_permission(sig, info, p);
 	rcu_read_unlock();
 
-	if (!ret && sig)
+	if (!ret && sig) {
 		ret = do_send_sig_info(sig, info, p, true);
+		if (!ret)
+			gr_log_signal(sig, !is_si_special(info) ? info->si_addr : NULL, p);
+	}
 
 	return ret;
 }
@@ -1319,7 +1367,7 @@ int kill_pid_info(int sig, struct siginfo *info, struct pid *pid)
 	rcu_read_lock();
 retry:
 	p = pid_task(pid, PIDTYPE_PID);
-	if (p) {
+	if (p && vx_check(vx_task_xid(p), VS_IDENT)) {
 		error = group_send_sig_info(sig, info, p);
 		if (unlikely(error == -ESRCH))
 			/*
@@ -1369,7 +1417,7 @@ int kill_pid_info_as_cred(int sig, struct siginfo *info, struct pid *pid,
 
 	rcu_read_lock();
 	p = pid_task(pid, PIDTYPE_PID);
-	if (!p) {
+	if (!p || !vx_check(vx_task_xid(p), VS_IDENT)) {
 		ret = -ESRCH;
 		goto out_unlock;
 	}
@@ -1421,8 +1469,10 @@ static int kill_something_info(int sig, struct siginfo *info, pid_t pid)
 		struct task_struct * p;
 
 		for_each_process(p) {
-			if (task_pid_vnr(p) > 1 &&
-					!same_thread_group(p, current)) {
+			if (vx_check(vx_task_xid(p), VS_ADMIN|VS_IDENT) &&
+				task_pid_vnr(p) > 1 &&
+				!same_thread_group(p, current) &&
+				!vx_current_initpid(p->pid)) {
 				int err = group_send_sig_info(sig, info, p);
 				++count;
 				if (err != -EPERM)
@@ -2264,6 +2314,11 @@ relock:
 				!sig_kernel_only(signr))
 			continue;
 
+		/* virtual init is protected against user signals */
+		if ((info->si_code == SI_USER) &&
+			vx_current_initpid(current->pid))
+			continue;
+
 		if (sig_kernel_stop(signr)) {
 			/*
 			 * The default action is to stop all threads in
@@ -2763,7 +2818,15 @@ do_send_specific(pid_t tgid, pid_t pid, int sig, struct siginfo *info)
 	int error = -ESRCH;
 
 	rcu_read_lock();
-	p = find_task_by_vpid(pid);
+#ifdef CONFIG_GRKERNSEC_CHROOT_FINDTASK
+	/* allow glibc communication via tgkill to other threads in our
+	   thread group */
+	if (grsec_enable_chroot_findtask && info->si_code == SI_TKILL &&
+	    sig == (SIGRTMIN+1) && tgid == info->si_pid)	    
+		p = find_task_by_vpid_unrestricted(pid);
+	else
+#endif
+		p = find_task_by_vpid(pid);
 	if (p && (tgid <= 0 || task_tgid_vnr(p) == tgid)) {
 		error = check_kill_permission(sig, info, p);
 		/*

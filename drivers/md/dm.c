@@ -20,6 +20,7 @@
 #include <linux/idr.h>
 #include <linux/hdreg.h>
 #include <linux/delay.h>
+#include <linux/vs_base.h>
 
 #include <trace/events/block.h>
 
@@ -132,6 +133,7 @@ struct mapped_device {
 	rwlock_t map_lock;
 	atomic_t holders;
 	atomic_t open_count;
+	xid_t xid;
 
 	unsigned long flags;
 
@@ -177,9 +179,9 @@ struct mapped_device {
 	/*
 	 * Event handling.
 	 */
-	atomic_t event_nr;
+	atomic_unchecked_t event_nr;
 	wait_queue_head_t eventq;
-	atomic_t uevent_seq;
+	atomic_unchecked_t uevent_seq;
 	struct list_head uevent_list;
 	spinlock_t uevent_lock; /* Protect access to uevent_list */
 
@@ -344,6 +346,7 @@ int dm_deleting_md(struct mapped_device *md)
 static int dm_blk_open(struct block_device *bdev, fmode_t mode)
 {
 	struct mapped_device *md;
+	int ret = -ENXIO;
 
 	spin_lock(&_minor_lock);
 
@@ -352,18 +355,19 @@ static int dm_blk_open(struct block_device *bdev, fmode_t mode)
 		goto out;
 
 	if (test_bit(DMF_FREEING, &md->flags) ||
-	    dm_deleting_md(md)) {
-		md = NULL;
+	    dm_deleting_md(md))
 		goto out;
-	}
+
+	ret = -EACCES;
+	if (!vx_check(md->xid, VS_IDENT|VS_HOSTID))
+		goto out;
 
 	dm_get(md);
 	atomic_inc(&md->open_count);
-
+	ret = 0;
 out:
 	spin_unlock(&_minor_lock);
-
-	return md ? 0 : -ENXIO;
+	return ret;
 }
 
 static int dm_blk_close(struct gendisk *disk, fmode_t mode)
@@ -582,6 +586,14 @@ int dm_set_geometry(struct mapped_device *md, struct hd_geometry *geo)
 	md->geometry = *geo;
 
 	return 0;
+}
+
+/*
+ * Get the xid associated with a dm device
+ */
+xid_t dm_get_xid(struct mapped_device *md)
+{
+	return md->xid;
 }
 
 /*-----------------------------------------------------------------
@@ -1845,11 +1857,12 @@ static struct mapped_device *alloc_dev(int minor)
 	rwlock_init(&md->map_lock);
 	atomic_set(&md->holders, 1);
 	atomic_set(&md->open_count, 0);
-	atomic_set(&md->event_nr, 0);
-	atomic_set(&md->uevent_seq, 0);
+	atomic_set_unchecked(&md->event_nr, 0);
+	atomic_set_unchecked(&md->uevent_seq, 0);
 	INIT_LIST_HEAD(&md->uevent_list);
 	spin_lock_init(&md->uevent_lock);
 
+	md->xid = vx_current_xid();
 	md->queue = blk_alloc_queue(GFP_KERNEL);
 	if (!md->queue)
 		goto bad_queue;
@@ -1980,7 +1993,7 @@ static void event_callback(void *context)
 
 	dm_send_uevents(&uevents, &disk_to_dev(md->disk)->kobj);
 
-	atomic_inc(&md->event_nr);
+	atomic_inc_unchecked(&md->event_nr);
 	wake_up(&md->eventq);
 }
 
@@ -2622,18 +2635,18 @@ int dm_kobject_uevent(struct mapped_device *md, enum kobject_action action,
 
 uint32_t dm_next_uevent_seq(struct mapped_device *md)
 {
-	return atomic_add_return(1, &md->uevent_seq);
+	return atomic_add_return_unchecked(1, &md->uevent_seq);
 }
 
 uint32_t dm_get_event_nr(struct mapped_device *md)
 {
-	return atomic_read(&md->event_nr);
+	return atomic_read_unchecked(&md->event_nr);
 }
 
 int dm_wait_event(struct mapped_device *md, int event_nr)
 {
 	return wait_event_interruptible(md->eventq,
-			(event_nr != atomic_read(&md->event_nr)));
+			(event_nr != atomic_read_unchecked(&md->event_nr)));
 }
 
 void dm_uevent_add(struct mapped_device *md, struct list_head *elist)

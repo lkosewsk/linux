@@ -86,6 +86,7 @@
 #include <linux/types.h>
 #include <linux/fcntl.h>
 #include <linux/module.h>
+#include <linux/security.h>
 #include <linux/socket.h>
 #include <linux/sockios.h>
 #include <linux/igmp.h>
@@ -107,6 +108,10 @@
 #include <net/xfrm.h>
 #include <trace/events/udp.h>
 #include "udp_impl.h"
+
+#ifdef CONFIG_GRKERNSEC_BLACKHOLE
+extern int grsec_enable_blackhole;
+#endif
 
 struct udp_table udp_table __read_mostly;
 EXPORT_SYMBOL(udp_table);
@@ -297,14 +302,7 @@ fail:
 }
 EXPORT_SYMBOL(udp_lib_get_port);
 
-static int ipv4_rcv_saddr_equal(const struct sock *sk1, const struct sock *sk2)
-{
-	struct inet_sock *inet1 = inet_sk(sk1), *inet2 = inet_sk(sk2);
-
-	return 	(!ipv6_only_sock(sk2)  &&
-		 (!inet1->inet_rcv_saddr || !inet2->inet_rcv_saddr ||
-		   inet1->inet_rcv_saddr == inet2->inet_rcv_saddr));
-}
+extern int ipv4_rcv_saddr_equal(const struct sock *, const struct sock *);
 
 static unsigned int udp4_portaddr_hash(struct net *net, __be32 saddr,
 				       unsigned int port)
@@ -339,6 +337,11 @@ static inline int compute_score(struct sock *sk, struct net *net, __be32 saddr,
 			if (inet->inet_rcv_saddr != daddr)
 				return -1;
 			score += 2;
+		} else {
+			/* block non nx_info ips */
+			if (!v4_addr_in_nx_info(sk->sk_nx_info,
+				daddr, NXA_MASK_BIND))
+				return -1;
 		}
 		if (inet->inet_daddr) {
 			if (inet->inet_daddr != saddr)
@@ -442,6 +445,7 @@ exact_match:
 	return result;
 }
 
+
 /* UDP is nearly always wildcards out the wazoo, it makes no sense to try
  * harder than this. -DaveM
  */
@@ -487,6 +491,11 @@ begin:
 	sk_nulls_for_each_rcu(sk, node, &hslot->head) {
 		score = compute_score(sk, net, saddr, hnum, sport,
 				      daddr, dport, dif);
+		/* FIXME: disabled?
+		if (score == 9) {
+			result = sk;
+			break;
+		} else */
 		if (score > badness) {
 			result = sk;
 			badness = score;
@@ -500,6 +509,7 @@ begin:
 	if (get_nulls_value(node) != slot)
 		goto begin;
 
+
 	if (result) {
 		if (unlikely(!atomic_inc_not_zero_hint(&result->sk_refcnt, 2)))
 			result = NULL;
@@ -509,6 +519,7 @@ begin:
 			goto begin;
 		}
 	}
+
 	rcu_read_unlock();
 	return result;
 }
@@ -551,8 +562,7 @@ static inline struct sock *udp_v4_mcast_next(struct net *net, struct sock *sk,
 		    udp_sk(s)->udp_port_hash != hnum ||
 		    (inet->inet_daddr && inet->inet_daddr != rmt_addr) ||
 		    (inet->inet_dport != rmt_port && inet->inet_dport) ||
-		    (inet->inet_rcv_saddr &&
-		     inet->inet_rcv_saddr != loc_addr) ||
+		    !v4_sock_addr_match(sk->sk_nx_info, inet, loc_addr)	||
 		    ipv6_only_sock(s) ||
 		    (s->sk_bound_dev_if && s->sk_bound_dev_if != dif))
 			continue;
@@ -564,6 +574,9 @@ static inline struct sock *udp_v4_mcast_next(struct net *net, struct sock *sk,
 found:
 	return s;
 }
+
+extern int gr_search_udp_recvmsg(struct sock *sk, const struct sk_buff *skb);
+extern int gr_search_udp_sendmsg(struct sock *sk, struct sockaddr_in *addr);
 
 /*
  * This routine is called by the ICMP module when it gets some
@@ -856,9 +869,18 @@ int udp_sendmsg(struct kiocb *iocb, struct sock *sk, struct msghdr *msg,
 		dport = usin->sin_port;
 		if (dport == 0)
 			return -EINVAL;
+
+		err = gr_search_udp_sendmsg(sk, usin);
+		if (err)
+			return err;
 	} else {
 		if (sk->sk_state != TCP_ESTABLISHED)
 			return -EDESTADDRREQ;
+
+		err = gr_search_udp_sendmsg(sk, NULL);
+		if (err)
+			return err;
+
 		daddr = inet->inet_daddr;
 		dport = inet->inet_dport;
 		/* Open fast path for connected socket.
@@ -929,6 +951,16 @@ int udp_sendmsg(struct kiocb *iocb, struct sock *sk, struct msghdr *msg,
 				   RT_SCOPE_UNIVERSE, sk->sk_protocol,
 				   inet_sk_flowi_flags(sk)|FLOWI_FLAG_CAN_SLEEP,
 				   faddr, saddr, dport, inet->inet_sport);
+
+		if (sk->sk_nx_info) {
+			rt = ip_v4_find_src(net, sk->sk_nx_info, fl4);
+			if (IS_ERR(rt)) {
+				err = PTR_ERR(rt);
+				rt = NULL;
+				goto out;
+			}
+			ip_rt_put(rt);
+		}
 
 		security_sk_classify_flow(sk, flowi4_to_flowi(fl4));
 		rt = ip_route_output_flow(net, fl4, sk);
@@ -1099,7 +1131,7 @@ static unsigned int first_packet_length(struct sock *sk)
 		udp_lib_checksum_complete(skb)) {
 		UDP_INC_STATS_BH(sock_net(sk), UDP_MIB_INERRORS,
 				 IS_UDPLITE(sk));
-		atomic_inc(&sk->sk_drops);
+		atomic_inc_unchecked(&sk->sk_drops);
 		__skb_unlink(skb, rcvq);
 		__skb_queue_tail(&list_kill, skb);
 	}
@@ -1185,6 +1217,10 @@ try_again:
 	if (!skb)
 		goto out;
 
+	err = gr_search_udp_recvmsg(sk, skb);
+	if (err)
+		goto out_free;
+
 	ulen = skb->len - sizeof(struct udphdr);
 	copied = len;
 	if (copied > ulen)
@@ -1228,7 +1264,8 @@ try_again:
 	if (sin) {
 		sin->sin_family = AF_INET;
 		sin->sin_port = udp_hdr(skb)->source;
-		sin->sin_addr.s_addr = ip_hdr(skb)->saddr;
+		sin->sin_addr.s_addr = nx_map_sock_lback(
+			skb->sk->sk_nx_info, ip_hdr(skb)->saddr);
 		memset(sin->sin_zero, 0, sizeof(sin->sin_zero));
 	}
 	if (inet->cmsg_flags)
@@ -1487,7 +1524,7 @@ int udp_queue_rcv_skb(struct sock *sk, struct sk_buff *skb)
 
 drop:
 	UDP_INC_STATS_BH(sock_net(sk), UDP_MIB_INERRORS, is_udplite);
-	atomic_inc(&sk->sk_drops);
+	atomic_inc_unchecked(&sk->sk_drops);
 	kfree_skb(skb);
 	return -1;
 }
@@ -1506,7 +1543,7 @@ static void flush_stack(struct sock **stack, unsigned int count,
 			skb1 = (i == final) ? skb : skb_clone(skb, GFP_ATOMIC);
 
 		if (!skb1) {
-			atomic_inc(&sk->sk_drops);
+			atomic_inc_unchecked(&sk->sk_drops);
 			UDP_INC_STATS_BH(sock_net(sk), UDP_MIB_RCVBUFERRORS,
 					 IS_UDPLITE(sk));
 			UDP_INC_STATS_BH(sock_net(sk), UDP_MIB_INERRORS,
@@ -1675,6 +1712,9 @@ int __udp4_lib_rcv(struct sk_buff *skb, struct udp_table *udptable,
 		goto csum_error;
 
 	UDP_INC_STATS_BH(net, UDP_MIB_NOPORTS, proto == IPPROTO_UDPLITE);
+#ifdef CONFIG_GRKERNSEC_BLACKHOLE
+	if (!grsec_enable_blackhole || (skb->dev->flags & IFF_LOOPBACK))
+#endif
 	icmp_send(skb, ICMP_DEST_UNREACH, ICMP_PORT_UNREACH, 0);
 
 	/*
@@ -1974,6 +2014,8 @@ static struct sock *udp_get_first(struct seq_file *seq, int start)
 		sk_nulls_for_each(sk, node, &hslot->head) {
 			if (!net_eq(sock_net(sk), net))
 				continue;
+			if (!nx_check(sk->sk_nid, VS_WATCH_P | VS_IDENT))
+				continue;
 			if (sk->sk_family == state->family)
 				goto found;
 		}
@@ -1991,7 +2033,9 @@ static struct sock *udp_get_next(struct seq_file *seq, struct sock *sk)
 
 	do {
 		sk = sk_nulls_next(sk);
-	} while (sk && (!net_eq(sock_net(sk), net) || sk->sk_family != state->family));
+	} while (sk && (!net_eq(sock_net(sk), net) ||
+		sk->sk_family != state->family ||
+		!nx_check(sk->sk_nid, VS_WATCH_P | VS_IDENT)));
 
 	if (!sk) {
 		if (state->bucket <= state->udp_table->mask)
@@ -2098,8 +2142,13 @@ static void udp4_format_sock(struct sock *sp, struct seq_file *f,
 		sk_wmem_alloc_get(sp),
 		sk_rmem_alloc_get(sp),
 		0, 0L, 0, sock_i_uid(sp), 0, sock_i_ino(sp),
-		atomic_read(&sp->sk_refcnt), sp,
-		atomic_read(&sp->sk_drops), len);
+		atomic_read(&sp->sk_refcnt),
+#ifdef CONFIG_GRKERNSEC_HIDESYM
+		NULL,
+#else
+		sp,
+#endif
+		atomic_read_unchecked(&sp->sk_drops), len);
 }
 
 int udp4_seq_show(struct seq_file *seq, void *v)

@@ -87,6 +87,9 @@ int sysctl_tcp_tw_reuse __read_mostly;
 int sysctl_tcp_low_latency __read_mostly;
 EXPORT_SYMBOL(sysctl_tcp_low_latency);
 
+#ifdef CONFIG_GRKERNSEC_BLACKHOLE
+extern int grsec_enable_blackhole;
+#endif
 
 #ifdef CONFIG_TCP_MD5SIG
 static struct tcp_md5sig_key *tcp_v4_md5_do_lookup(struct sock *sk,
@@ -1636,6 +1639,9 @@ int tcp_v4_do_rcv(struct sock *sk, struct sk_buff *skb)
 	return 0;
 
 reset:
+#ifdef CONFIG_GRKERNSEC_BLACKHOLE
+	if (!grsec_enable_blackhole)
+#endif
 	tcp_v4_send_reset(rsk, skb);
 discard:
 	kfree_skb(skb);
@@ -1698,12 +1704,19 @@ int tcp_v4_rcv(struct sk_buff *skb)
 	TCP_SKB_CB(skb)->sacked	 = 0;
 
 	sk = __inet_lookup_skb(&tcp_hashinfo, skb, th->source, th->dest);
-	if (!sk)
+	if (!sk) {
+#ifdef CONFIG_GRKERNSEC_BLACKHOLE
+		ret = 1;
+#endif
 		goto no_tcp_socket;
-
+	}
 process:
-	if (sk->sk_state == TCP_TIME_WAIT)
+	if (sk->sk_state == TCP_TIME_WAIT) {
+#ifdef CONFIG_GRKERNSEC_BLACKHOLE
+		ret = 2;
+#endif
 		goto do_time_wait;
+	}
 
 	if (unlikely(iph->ttl < inet_sk(sk)->min_ttl)) {
 		NET_INC_STATS_BH(net, LINUX_MIB_TCPMINTTLDROP);
@@ -1753,6 +1766,10 @@ no_tcp_socket:
 bad_packet:
 		TCP_INC_STATS_BH(net, TCP_MIB_INERRS);
 	} else {
+#ifdef CONFIG_GRKERNSEC_BLACKHOLE
+		if (!grsec_enable_blackhole || (ret == 1 &&
+		    (skb->dev->flags & IFF_LOOPBACK)))
+#endif
 		tcp_v4_send_reset(NULL, skb);
 	}
 
@@ -2032,6 +2049,12 @@ static void *listening_get_next(struct seq_file *seq, void *cur)
 		req = req->dl_next;
 		while (1) {
 			while (req) {
+				vxdprintk(VXD_CBIT(net, 6),
+					"sk,req: %p [#%d] (from %d)", req->sk,
+					(req->sk)?req->sk->sk_nid:0, nx_current_nid());
+				if (req->sk &&
+					!nx_check(req->sk->sk_nid, VS_WATCH_P | VS_IDENT))
+					continue;
 				if (req->rsk_ops->family == st->family) {
 					cur = req;
 					goto out;
@@ -2056,6 +2079,10 @@ get_req:
 	}
 get_sk:
 	sk_nulls_for_each_from(sk, node) {
+		vxdprintk(VXD_CBIT(net, 6), "sk: %p [#%d] (from %d)",
+			sk, sk->sk_nid, nx_current_nid());
+		if (!nx_check(sk->sk_nid, VS_WATCH_P | VS_IDENT))
+			continue;
 		if (!net_eq(sock_net(sk), net))
 			continue;
 		if (sk->sk_family == st->family) {
@@ -2132,6 +2159,11 @@ static void *established_get_first(struct seq_file *seq)
 
 		spin_lock_bh(lock);
 		sk_nulls_for_each(sk, node, &tcp_hashinfo.ehash[st->bucket].chain) {
+			vxdprintk(VXD_CBIT(net, 6),
+				"sk,egf: %p [#%d] (from %d)",
+				sk, sk->sk_nid, nx_current_nid());
+			if (!nx_check(sk->sk_nid, VS_WATCH_P | VS_IDENT))
+				continue;
 			if (sk->sk_family != st->family ||
 			    !net_eq(sock_net(sk), net)) {
 				continue;
@@ -2142,6 +2174,11 @@ static void *established_get_first(struct seq_file *seq)
 		st->state = TCP_SEQ_STATE_TIME_WAIT;
 		inet_twsk_for_each(tw, node,
 				   &tcp_hashinfo.ehash[st->bucket].twchain) {
+			vxdprintk(VXD_CBIT(net, 6),
+				"tw: %p [#%d] (from %d)",
+				tw, tw->tw_nid, nx_current_nid());
+			if (!nx_check(tw->tw_nid, VS_WATCH_P | VS_IDENT))
+				continue;
 			if (tw->tw_family != st->family ||
 			    !net_eq(twsk_net(tw), net)) {
 				continue;
@@ -2171,7 +2208,9 @@ static void *established_get_next(struct seq_file *seq, void *cur)
 		tw = cur;
 		tw = tw_next(tw);
 get_tw:
-		while (tw && (tw->tw_family != st->family || !net_eq(twsk_net(tw), net))) {
+		while (tw && (tw->tw_family != st->family ||
+			!net_eq(twsk_net(tw), net) ||
+			!nx_check(tw->tw_nid, VS_WATCH_P | VS_IDENT))) {
 			tw = tw_next(tw);
 		}
 		if (tw) {
@@ -2195,6 +2234,11 @@ get_tw:
 		sk = sk_nulls_next(sk);
 
 	sk_nulls_for_each_from(sk, node) {
+		vxdprintk(VXD_CBIT(net, 6),
+			"sk,egn: %p [#%d] (from %d)",
+			sk, sk->sk_nid, nx_current_nid());
+		if (!nx_check(sk->sk_nid, VS_WATCH_P | VS_IDENT))
+			continue;
 		if (sk->sk_family == st->family && net_eq(sock_net(sk), net))
 			goto found;
 	}
@@ -2400,9 +2444,9 @@ static void get_openreq4(const struct sock *sk, const struct request_sock *req,
 	seq_printf(f, "%4d: %08X:%04X %08X:%04X"
 		" %02X %08X:%08X %02X:%08lX %08X %5d %8d %u %d %pK%n",
 		i,
-		ireq->loc_addr,
+		nx_map_sock_lback(current_nx_info(), ireq->loc_addr),
 		ntohs(inet_sk(sk)->inet_sport),
-		ireq->rmt_addr,
+		nx_map_sock_lback(current_nx_info(), ireq->rmt_addr),
 		ntohs(ireq->rmt_port),
 		TCP_SYN_RECV,
 		0, 0, /* could print option size, but that is af dependent. */
@@ -2413,7 +2457,11 @@ static void get_openreq4(const struct sock *sk, const struct request_sock *req,
 		0,  /* non standard timer */
 		0, /* open_requests have no inode */
 		atomic_read(&sk->sk_refcnt),
+#ifdef CONFIG_GRKERNSEC_HIDESYM
+		NULL,
+#else
 		req,
+#endif
 		len);
 }
 
@@ -2424,8 +2472,8 @@ static void get_tcp4_sock(struct sock *sk, struct seq_file *f, int i, int *len)
 	const struct tcp_sock *tp = tcp_sk(sk);
 	const struct inet_connection_sock *icsk = inet_csk(sk);
 	const struct inet_sock *inet = inet_sk(sk);
-	__be32 dest = inet->inet_daddr;
-	__be32 src = inet->inet_rcv_saddr;
+	__be32 dest = nx_map_sock_lback(current_nx_info(), inet->inet_daddr);
+	__be32 src = nx_map_sock_lback(current_nx_info(), inet->inet_rcv_saddr);
 	__u16 destp = ntohs(inet->inet_dport);
 	__u16 srcp = ntohs(inet->inet_sport);
 	int rx_queue;
@@ -2463,7 +2511,12 @@ static void get_tcp4_sock(struct sock *sk, struct seq_file *f, int i, int *len)
 		sock_i_uid(sk),
 		icsk->icsk_probes_out,
 		sock_i_ino(sk),
-		atomic_read(&sk->sk_refcnt), sk,
+		atomic_read(&sk->sk_refcnt),
+#ifdef CONFIG_GRKERNSEC_HIDESYM
+		NULL,
+#else
+		sk,
+#endif
 		jiffies_to_clock_t(icsk->icsk_rto),
 		jiffies_to_clock_t(icsk->icsk_ack.ato),
 		(icsk->icsk_ack.quick << 1) | icsk->icsk_ack.pingpong,
@@ -2482,8 +2535,8 @@ static void get_timewait4_sock(const struct inet_timewait_sock *tw,
 	if (ttd < 0)
 		ttd = 0;
 
-	dest  = tw->tw_daddr;
-	src   = tw->tw_rcv_saddr;
+	dest  = nx_map_sock_lback(current_nx_info(), tw->tw_daddr);
+	src   = nx_map_sock_lback(current_nx_info(), tw->tw_rcv_saddr);
 	destp = ntohs(tw->tw_dport);
 	srcp  = ntohs(tw->tw_sport);
 
@@ -2491,7 +2544,13 @@ static void get_timewait4_sock(const struct inet_timewait_sock *tw,
 		" %02X %08X:%08X %02X:%08lX %08X %5d %8d %d %d %pK%n",
 		i, src, srcp, dest, destp, tw->tw_substate, 0, 0,
 		3, jiffies_to_clock_t(ttd), 0, 0, 0, 0,
-		atomic_read(&tw->tw_refcnt), tw, len);
+		atomic_read(&tw->tw_refcnt),
+#ifdef CONFIG_GRKERNSEC_HIDESYM
+		NULL,
+#else
+		tw,
+#endif
+		len);
 }
 
 #define TMPSZ 150

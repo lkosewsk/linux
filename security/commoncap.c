@@ -29,6 +29,7 @@
 #include <linux/securebits.h>
 #include <linux/user_namespace.h>
 #include <linux/personality.h>
+#include <net/sock.h>
 
 /*
  * If a non-root user executes a setuid-root binary in
@@ -59,10 +60,11 @@ int cap_netlink_send(struct sock *sk, struct sk_buff *skb)
 
 int cap_netlink_recv(struct sk_buff *skb, int cap)
 {
-	if (!cap_raised(current_cap(), cap))
+	if (!cap_raised(current_cap(), cap) || !gr_is_capable(cap))
 		return -EPERM;
 	return 0;
 }
+
 EXPORT_SYMBOL(cap_netlink_recv);
 
 /**
@@ -84,14 +86,20 @@ EXPORT_SYMBOL(cap_netlink_recv);
 int cap_capable(struct task_struct *tsk, const struct cred *cred,
 		struct user_namespace *targ_ns, int cap, int audit)
 {
+	struct vx_info *vxi = tsk->vx_info;
+
 	for (;;) {
 		/* The creator of the user namespace has all caps. */
 		if (targ_ns != &init_user_ns && targ_ns->creator == cred->user)
 			return 0;
 
 		/* Do we have the necessary capabilities? */
-		if (targ_ns == cred->user->user_ns)
-			return cap_raised(cred->cap_effective, cap) ? 0 : -EPERM;
+		if (targ_ns == cred->user->user_ns) {
+			if (vx_info_flags(vxi, VXF_STATE_SETUP, 0) &&
+			    cap_raised(cred->cap_effective, cap))
+				return 0;
+			return vx_cap_raised(vxi, cred->cap_effective, cap) ? 0 : -EPERM;
+		}
 
 		/* Have we tried all of the parent namespaces? */
 		if (targ_ns == &init_user_ns)
@@ -585,6 +593,9 @@ int cap_bprm_secureexec(struct linux_binprm *bprm)
 {
 	const struct cred *cred = current_cred();
 
+	if (gr_acl_enable_at_secure())
+		return 1;
+
 	if (cred->uid != 0) {
 		if (bprm->cap_effective)
 			return 1;
@@ -621,7 +632,7 @@ int cap_inode_setxattr(struct dentry *dentry, const char *name,
 
 	if (!strncmp(name, XATTR_SECURITY_PREFIX,
 		     sizeof(XATTR_SECURITY_PREFIX) - 1) &&
-	    !capable(CAP_SYS_ADMIN))
+		!vx_capable(CAP_SYS_ADMIN, VXC_FS_SECURITY))
 		return -EPERM;
 	return 0;
 }
@@ -647,7 +658,7 @@ int cap_inode_removexattr(struct dentry *dentry, const char *name)
 
 	if (!strncmp(name, XATTR_SECURITY_PREFIX,
 		     sizeof(XATTR_SECURITY_PREFIX) - 1) &&
-	    !capable(CAP_SYS_ADMIN))
+		!vx_capable(CAP_SYS_ADMIN, VXC_FS_SECURITY))
 		return -EPERM;
 	return 0;
 }

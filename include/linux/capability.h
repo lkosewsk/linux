@@ -280,6 +280,7 @@ struct cpu_vfs_cap_data {
    arbitrary SCSI commands */
 /* Allow setting encryption key on loopback filesystem */
 /* Allow setting zone reclaim policy */
+/* Allow the selection of a security context */
 
 #define CAP_SYS_ADMIN        21
 
@@ -363,7 +364,12 @@ struct cpu_vfs_cap_data {
 
 #define CAP_LAST_CAP         CAP_WAKE_ALARM
 
-#define cap_valid(x) ((x) >= 0 && (x) <= CAP_LAST_CAP)
+/* Allow context manipulations */
+/* Allow changing context info on files */
+
+#define CAP_CONTEXT	     63
+
+#define cap_valid(x) ((x) >= 0 && ((x) <= CAP_LAST_CAP || (x) == CAP_CONTEXT))
 
 /*
  * Bit location of each capability (used by user-space library and kernel)
@@ -548,6 +554,9 @@ extern bool capable(int cap);
 extern bool ns_capable(struct user_namespace *ns, int cap);
 extern bool task_ns_capable(struct task_struct *t, int cap);
 extern bool nsown_capable(int cap);
+extern bool task_ns_capable_nolog(struct task_struct *t, int cap);
+extern bool ns_capable_nolog(struct user_namespace *ns, int cap);
+extern bool capable_nolog(int cap);
 
 /* audit system wants to get cap info from files as well */
 extern int get_vfs_caps_from_disk(const struct dentry *dentry, struct cpu_vfs_cap_data *cpu_caps);

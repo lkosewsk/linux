@@ -45,41 +45,72 @@
 #include <net/tcp_states.h>
 #include <net/ip6_checksum.h>
 #include <net/xfrm.h>
+#include <linux/vs_inet6.h>
 
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
 #include "udp_impl.h"
 
-int ipv6_rcv_saddr_equal(const struct sock *sk, const struct sock *sk2)
+#ifdef CONFIG_GRKERNSEC_BLACKHOLE
+extern int grsec_enable_blackhole;
+#endif
+
+int ipv6_rcv_saddr_equal(const struct sock *sk1, const struct sock *sk2)
 {
-	const struct in6_addr *sk_rcv_saddr6 = &inet6_sk(sk)->rcv_saddr;
+	const struct in6_addr *sk1_rcv_saddr6 = &inet6_sk(sk1)->rcv_saddr;
 	const struct in6_addr *sk2_rcv_saddr6 = inet6_rcv_saddr(sk2);
-	__be32 sk1_rcv_saddr = sk_rcv_saddr(sk);
+	__be32 sk1_rcv_saddr = sk_rcv_saddr(sk1);
 	__be32 sk2_rcv_saddr = sk_rcv_saddr(sk2);
-	int sk_ipv6only = ipv6_only_sock(sk);
+	int sk1_ipv6only = ipv6_only_sock(sk1);
 	int sk2_ipv6only = inet_v6_ipv6only(sk2);
-	int addr_type = ipv6_addr_type(sk_rcv_saddr6);
+	int addr_type = ipv6_addr_type(sk1_rcv_saddr6);
 	int addr_type2 = sk2_rcv_saddr6 ? ipv6_addr_type(sk2_rcv_saddr6) : IPV6_ADDR_MAPPED;
 
 	/* if both are mapped, treat as IPv4 */
-	if (addr_type == IPV6_ADDR_MAPPED && addr_type2 == IPV6_ADDR_MAPPED)
-		return (!sk2_ipv6only &&
+	if (addr_type == IPV6_ADDR_MAPPED && addr_type2 == IPV6_ADDR_MAPPED) {
+		if (!sk2_ipv6only &&
 			(!sk1_rcv_saddr || !sk2_rcv_saddr ||
-			  sk1_rcv_saddr == sk2_rcv_saddr));
+			  sk1_rcv_saddr == sk2_rcv_saddr))
+			goto vs_v4;
+		else
+			return 0;
+	}
 
 	if (addr_type2 == IPV6_ADDR_ANY &&
 	    !(sk2_ipv6only && addr_type == IPV6_ADDR_MAPPED))
-		return 1;
+		goto vs;
 
 	if (addr_type == IPV6_ADDR_ANY &&
-	    !(sk_ipv6only && addr_type2 == IPV6_ADDR_MAPPED))
-		return 1;
+	    !(sk1_ipv6only && addr_type2 == IPV6_ADDR_MAPPED))
+		goto vs;
 
 	if (sk2_rcv_saddr6 &&
-	    ipv6_addr_equal(sk_rcv_saddr6, sk2_rcv_saddr6))
-		return 1;
+	    ipv6_addr_equal(sk1_rcv_saddr6, sk2_rcv_saddr6))
+		goto vs;
 
 	return 0;
+
+vs_v4:
+	if (!sk1_rcv_saddr && !sk2_rcv_saddr)
+		return nx_v4_addr_conflict(sk1->sk_nx_info, sk2->sk_nx_info);
+	if (!sk2_rcv_saddr)
+		return v4_addr_in_nx_info(sk1->sk_nx_info, sk2_rcv_saddr, -1);
+	if (!sk1_rcv_saddr)
+		return v4_addr_in_nx_info(sk2->sk_nx_info, sk1_rcv_saddr, -1);
+	return 1;
+vs:
+	if (addr_type2 == IPV6_ADDR_ANY && addr_type == IPV6_ADDR_ANY)
+		return nx_v6_addr_conflict(sk1->sk_nx_info, sk2->sk_nx_info);
+	else if (addr_type2 == IPV6_ADDR_ANY)
+		return v6_addr_in_nx_info(sk2->sk_nx_info, sk1_rcv_saddr6, -1);
+	else if (addr_type == IPV6_ADDR_ANY) {
+		if (addr_type2 == IPV6_ADDR_MAPPED)
+			return nx_v4_addr_conflict(sk1->sk_nx_info, sk2->sk_nx_info);
+		else
+			return v6_addr_in_nx_info(sk1->sk_nx_info, sk2_rcv_saddr6, -1);
+	}
+	return 1;
+
 }
 
 static unsigned int udp6_portaddr_hash(struct net *net,
@@ -143,6 +174,10 @@ static inline int compute_score(struct sock *sk, struct net *net,
 			if (!ipv6_addr_equal(&np->rcv_saddr, daddr))
 				return -1;
 			score++;
+		} else {
+			/* block non nx_info ips */
+			if (!v6_addr_in_nx_info(sk->sk_nx_info, daddr, -1))
+				return -1;
 		}
 		if (!ipv6_addr_any(&np->daddr)) {
 			if (!ipv6_addr_equal(&np->daddr, saddr))
@@ -549,7 +584,7 @@ int udpv6_queue_rcv_skb(struct sock * sk, struct sk_buff *skb)
 
 	return 0;
 drop:
-	atomic_inc(&sk->sk_drops);
+	atomic_inc_unchecked(&sk->sk_drops);
 drop_no_sk_drops_inc:
 	UDP6_INC_STATS_BH(sock_net(sk), UDP_MIB_INERRORS, is_udplite);
 	kfree_skb(skb);
@@ -625,7 +660,7 @@ static void flush_stack(struct sock **stack, unsigned int count,
 			continue;
 		}
 drop:
-		atomic_inc(&sk->sk_drops);
+		atomic_inc_unchecked(&sk->sk_drops);
 		UDP6_INC_STATS_BH(sock_net(sk),
 				UDP_MIB_RCVBUFERRORS, IS_UDPLITE(sk));
 		UDP6_INC_STATS_BH(sock_net(sk),
@@ -780,6 +815,9 @@ int __udp6_lib_rcv(struct sk_buff *skb, struct udp_table *udptable,
 		UDP6_INC_STATS_BH(net, UDP_MIB_NOPORTS,
 				proto == IPPROTO_UDPLITE);
 
+#ifdef CONFIG_GRKERNSEC_BLACKHOLE
+		if (!grsec_enable_blackhole || (skb->dev->flags & IFF_LOOPBACK))
+#endif
 		icmpv6_send(skb, ICMPV6_DEST_UNREACH, ICMPV6_PORT_UNREACH, 0);
 
 		kfree_skb(skb);
@@ -796,7 +834,7 @@ int __udp6_lib_rcv(struct sk_buff *skb, struct udp_table *udptable,
 	if (!sock_owned_by_user(sk))
 		udpv6_queue_rcv_skb(sk, skb);
 	else if (sk_add_backlog(sk, skb)) {
-		atomic_inc(&sk->sk_drops);
+		atomic_inc_unchecked(&sk->sk_drops);
 		bh_unlock_sock(sk);
 		sock_put(sk);
 		goto discard;
@@ -1407,8 +1445,13 @@ static void udp6_sock_seq_show(struct seq_file *seq, struct sock *sp, int bucket
 		   0, 0L, 0,
 		   sock_i_uid(sp), 0,
 		   sock_i_ino(sp),
-		   atomic_read(&sp->sk_refcnt), sp,
-		   atomic_read(&sp->sk_drops));
+		   atomic_read(&sp->sk_refcnt),
+#ifdef CONFIG_GRKERNSEC_HIDESYM
+		   NULL,
+#else
+		   sp,
+#endif
+		   atomic_read_unchecked(&sp->sk_drops));
 }
 
 int udp6_seq_show(struct seq_file *seq, void *v)

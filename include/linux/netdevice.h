@@ -949,6 +949,7 @@ struct net_device_ops {
 	int			(*ndo_set_features)(struct net_device *dev,
 						    u32 features);
 };
+typedef struct net_device_ops __no_const net_device_ops_no_const;
 
 /*
  *	The DEVICE structure.
@@ -1088,7 +1089,7 @@ struct net_device {
 	int			iflink;
 
 	struct net_device_stats	stats;
-	atomic_long_t		rx_dropped; /* dropped packets by core network
+	atomic_long_unchecked_t	rx_dropped; /* dropped packets by core network
 					     * Do not use this in drivers.
 					     */
 
@@ -1637,6 +1638,7 @@ extern void		netdev_resync_ops(struct net_device *dev);
 
 extern struct net_device	*dev_get_by_index(struct net *net, int ifindex);
 extern struct net_device	*__dev_get_by_index(struct net *net, int ifindex);
+extern struct net_device	*dev_get_by_index_real_rcu(struct net *net, int ifindex);
 extern struct net_device	*dev_get_by_index_rcu(struct net *net, int ifindex);
 extern int		dev_restart(struct net_device *dev);
 #ifdef CONFIG_NETPOLL_TRAP

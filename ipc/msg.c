@@ -37,6 +37,7 @@
 #include <linux/rwsem.h>
 #include <linux/nsproxy.h>
 #include <linux/ipc_namespace.h>
+#include <linux/vs_base.h>
 
 #include <asm/current.h>
 #include <asm/uaccess.h>
@@ -190,6 +191,7 @@ static int newque(struct ipc_namespace *ns, struct ipc_params *params)
 
 	msq->q_perm.mode = msgflg & S_IRWXUGO;
 	msq->q_perm.key = key;
+	msq->q_perm.xid = vx_current_xid();
 
 	msq->q_perm.security = NULL;
 	retval = security_msg_queue_alloc(msq);
@@ -309,17 +311,18 @@ static inline int msg_security(struct kern_ipc_perm *ipcp, int msgflg)
 	return security_msg_queue_associate(msq, msgflg);
 }
 
+static struct ipc_ops msg_ops = {
+	.getnew		= newque,
+	.associate	= msg_security,
+	.more_checks	= NULL
+};
+
 SYSCALL_DEFINE2(msgget, key_t, key, int, msgflg)
 {
 	struct ipc_namespace *ns;
-	struct ipc_ops msg_ops;
 	struct ipc_params msg_params;
 
 	ns = current->nsproxy->ipc_ns;
-
-	msg_ops.getnew = newque;
-	msg_ops.associate = msg_security;
-	msg_ops.more_checks = NULL;
 
 	msg_params.key = key;
 	msg_params.flg = msgflg;

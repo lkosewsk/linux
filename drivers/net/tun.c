@@ -64,6 +64,7 @@
 #include <linux/nsproxy.h>
 #include <linux/virtio_net.h>
 #include <linux/rcupdate.h>
+#include <linux/vs_network.h>
 #include <net/net_namespace.h>
 #include <net/netns/generic.h>
 #include <net/rtnetlink.h>
@@ -121,6 +122,7 @@ struct tun_struct {
 	unsigned int 		flags;
 	uid_t			owner;
 	gid_t			group;
+	nid_t			nid;
 
 	struct net_device	*dev;
 	u32			set_features;
@@ -359,7 +361,7 @@ static void tun_free_netdev(struct net_device *dev)
 {
 	struct tun_struct *tun = netdev_priv(dev);
 
-	sock_put(tun->socket.sk);
+	sk_release_kernel(tun->socket.sk);
 }
 
 /* Net device open. */
@@ -909,6 +911,7 @@ static void tun_setup(struct net_device *dev)
 
 	tun->owner = -1;
 	tun->group = -1;
+	tun->nid = current->nid;
 
 	dev->ethtool_ops = &tun_ethtool_ops;
 	dev->destructor = tun_free_netdev;
@@ -979,10 +982,18 @@ static int tun_recvmsg(struct kiocb *iocb, struct socket *sock,
 	return ret;
 }
 
+static int tun_release(struct socket *sock)
+{
+	if (sock->sk)
+		sock_put(sock->sk);
+	return 0;
+}
+
 /* Ops structure to mimic raw sockets with tun */
 static const struct proto_ops tun_socket_ops = {
 	.sendmsg = tun_sendmsg,
 	.recvmsg = tun_recvmsg,
+	.release = tun_release,
 };
 
 static struct proto tun_proto = {
@@ -1059,7 +1070,7 @@ static int tun_set_iff(struct net *net, struct file *file, struct ifreq *ifr)
 
 		if (((tun->owner != -1 && cred->euid != tun->owner) ||
 		     (tun->group != -1 && !in_egroup_p(tun->group))) &&
-		    !capable(CAP_NET_ADMIN))
+		!cap_raised(current_cap(), CAP_NET_ADMIN))
 			return -EPERM;
 		err = security_tun_dev_attach(tun->socket.sk);
 		if (err < 0)
@@ -1073,7 +1084,7 @@ static int tun_set_iff(struct net *net, struct file *file, struct ifreq *ifr)
 		char *name;
 		unsigned long flags = 0;
 
-		if (!capable(CAP_NET_ADMIN))
+		if (!nx_capable(CAP_NET_ADMIN, NXC_TUN_CREATE))
 			return -EPERM;
 		err = security_tun_dev_create();
 		if (err < 0)
@@ -1109,10 +1120,11 @@ static int tun_set_iff(struct net *net, struct file *file, struct ifreq *ifr)
 		tun->vnet_hdr_sz = sizeof(struct virtio_net_hdr);
 
 		err = -ENOMEM;
-		sk = sk_alloc(net, AF_UNSPEC, GFP_KERNEL, &tun_proto);
+		sk = sk_alloc(&init_net, AF_UNSPEC, GFP_KERNEL, &tun_proto);
 		if (!sk)
 			goto err_free_dev;
 
+		sk_change_net(sk, net);
 		tun->socket.wq = &tun->wq;
 		init_waitqueue_head(&tun->wq.wait);
 		tun->socket.ops = &tun_socket_ops;
@@ -1140,6 +1152,9 @@ static int tun_set_iff(struct net *net, struct file *file, struct ifreq *ifr)
 			pr_err("Failed to create tun sysfs files\n");
 
 		sk->sk_destruct = tun_sock_destruct;
+
+		if (!nx_check(tun->nid, VS_IDENT | VS_HOSTID | VS_ADMIN_P))
+			return -EPERM;
 
 		err = tun_attach(tun, file);
 		if (err < 0)
@@ -1173,7 +1188,7 @@ static int tun_set_iff(struct net *net, struct file *file, struct ifreq *ifr)
 	return 0;
 
  err_free_sk:
-	sock_put(sk);
+	tun_free_netdev(dev);
  err_free_dev:
 	free_netdev(dev);
  failed:
@@ -1320,6 +1335,16 @@ static long __tun_chr_ioctl(struct file *file, unsigned int cmd,
 		tun->group= (gid_t) arg;
 
 		tun_debug(KERN_INFO, tun, "group set to %d\n", tun->group);
+		break;
+
+	case TUNSETNID:
+		if (!capable(CAP_CONTEXT))
+			return -EPERM;
+
+		/* Set nid owner of the device */
+		tun->nid = (nid_t) arg;
+
+		tun_debug(KERN_INFO, tun, "nid owner set to %u\n", tun->nid);
 		break;
 
 	case TUNSETLINK:

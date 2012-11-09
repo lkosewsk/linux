@@ -149,6 +149,10 @@ struct sock_common {
 #ifdef CONFIG_NET_NS
 	struct net	 	*skc_net;
 #endif
+	xid_t			skc_xid;
+	struct vx_info		*skc_vx_info;
+	nid_t			skc_nid;
+	struct nx_info		*skc_nx_info;
 	/*
 	 * fields between dontcopy_begin/dontcopy_end
 	 * are not copied in sock_copy()
@@ -256,6 +260,10 @@ struct sock {
 #define sk_bind_node		__sk_common.skc_bind_node
 #define sk_prot			__sk_common.skc_prot
 #define sk_net			__sk_common.skc_net
+#define sk_xid			__sk_common.skc_xid
+#define sk_vx_info		__sk_common.skc_vx_info
+#define sk_nid			__sk_common.skc_nid
+#define sk_nx_info		__sk_common.skc_nx_info
 	socket_lock_t		sk_lock;
 	struct sk_buff_head	sk_receive_queue;
 	/*
@@ -277,7 +285,7 @@ struct sock {
 #ifdef CONFIG_RPS
 	__u32			sk_rxhash;
 #endif
-	atomic_t		sk_drops;
+	atomic_unchecked_t	sk_drops;
 	int			sk_rcvbuf;
 
 	struct sk_filter __rcu	*sk_filter;
@@ -1402,7 +1410,7 @@ static inline void sk_nocaps_add(struct sock *sk, int flags)
 }
 
 static inline int skb_do_copy_data_nocache(struct sock *sk, struct sk_buff *skb,
-					   char __user *from, char *to,
+					   char __user *from, unsigned char *to,
 					   int copy, int offset)
 {
 	if (skb->ip_summed == CHECKSUM_NONE) {

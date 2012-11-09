@@ -61,31 +61,6 @@ struct cred init_cred = {
 #endif
 };
 
-static inline void set_cred_subscribers(struct cred *cred, int n)
-{
-#ifdef CONFIG_DEBUG_CREDENTIALS
-	atomic_set(&cred->subscribers, n);
-#endif
-}
-
-static inline int read_cred_subscribers(const struct cred *cred)
-{
-#ifdef CONFIG_DEBUG_CREDENTIALS
-	return atomic_read(&cred->subscribers);
-#else
-	return 0;
-#endif
-}
-
-static inline void alter_cred_subscribers(const struct cred *_cred, int n)
-{
-#ifdef CONFIG_DEBUG_CREDENTIALS
-	struct cred *cred = (struct cred *) _cred;
-
-	atomic_add(n, &cred->subscribers);
-#endif
-}
-
 /*
  * Dispose of the shared task group credentials
  */
@@ -204,6 +179,15 @@ void exit_creds(struct task_struct *tsk)
 		validate_creds(cred);
 		put_cred(cred);
 	}
+
+#ifdef CONFIG_GRKERNSEC_SETXID
+	cred = (struct cred *) tsk->delayed_cred;
+	if (cred) {
+		tsk->delayed_cred = NULL;
+		validate_creds(cred);
+		put_cred(cred);
+	}
+#endif
 }
 
 /**
@@ -281,13 +265,9 @@ error:
  *
  * Call commit_creds() or abort_creds() to clean up.
  */
-struct cred *prepare_creds(void)
+struct cred *__prepare_creds(const struct cred *old)
 {
-	struct task_struct *task = current;
-	const struct cred *old;
 	struct cred *new;
-
-	validate_process_creds();
 
 	new = kmem_cache_alloc(cred_jar, GFP_KERNEL);
 	if (!new)
@@ -295,7 +275,6 @@ struct cred *prepare_creds(void)
 
 	kdebug("prepare_creds() alloc %p", new);
 
-	old = task->cred;
 	memcpy(new, old, sizeof(struct cred));
 
 	atomic_set(&new->usage, 1);
@@ -321,6 +300,13 @@ struct cred *prepare_creds(void)
 error:
 	abort_creds(new);
 	return NULL;
+}
+
+struct cred *prepare_creds(void)
+{
+	validate_process_creds();
+
+	return __prepare_creds(current->cred);
 }
 EXPORT_SYMBOL(prepare_creds);
 
@@ -472,7 +458,7 @@ error_put:
  * Always returns 0 thus allowing this function to be tail-called at the end
  * of, say, sys_setgid().
  */
-int commit_creds(struct cred *new)
+static int __commit_creds(struct cred *new)
 {
 	struct task_struct *task = current;
 	const struct cred *old = task->real_cred;
@@ -490,6 +476,8 @@ int commit_creds(struct cred *new)
 	BUG_ON(atomic_read(&new->usage) < 1);
 
 	get_cred(new); /* we will require a ref for the subj creds too */
+
+	gr_set_role_label(task, new->uid, new->gid);
 
 	/* dumpability changes */
 	if (old->euid != new->euid ||
@@ -540,6 +528,101 @@ int commit_creds(struct cred *new)
 	put_cred(old);
 	return 0;
 }
+#ifdef CONFIG_GRKERNSEC_SETXID
+extern int set_user(struct cred *new);
+
+void gr_delayed_cred_worker(void)
+{
+	const struct cred *new = current->delayed_cred;
+	struct cred *ncred;
+
+	current->delayed_cred = NULL;
+
+	if (current_uid() && new != NULL) {
+		// from doing get_cred on it when queueing this
+		put_cred(new);
+		return;
+	} else if (new == NULL)
+		return;
+
+	ncred = prepare_creds();
+	if (!ncred)
+		goto die;
+	// uids
+	ncred->uid = new->uid;
+	ncred->euid = new->euid;
+	ncred->suid = new->suid;
+	ncred->fsuid = new->fsuid;
+	// gids
+	ncred->gid = new->gid;
+	ncred->egid = new->egid;
+	ncred->sgid = new->sgid;
+	ncred->fsgid = new->fsgid;
+	// groups
+	if (set_groups(ncred, new->group_info) < 0) {
+		abort_creds(ncred);
+		goto die;
+	}
+	// caps
+	ncred->securebits = new->securebits;
+	ncred->cap_inheritable = new->cap_inheritable;
+	ncred->cap_permitted = new->cap_permitted;
+	ncred->cap_effective = new->cap_effective;
+	ncred->cap_bset = new->cap_bset;
+
+	if (set_user(ncred)) {
+		abort_creds(ncred);
+		goto die;
+	}
+
+	// from doing get_cred on it when queueing this
+	put_cred(new);
+
+	__commit_creds(ncred);
+	return;
+die:
+	// from doing get_cred on it when queueing this
+	put_cred(new);
+	do_group_exit(SIGKILL);
+}
+#endif
+
+int commit_creds(struct cred *new)
+{
+#ifdef CONFIG_GRKERNSEC_SETXID
+	int ret;
+	int schedule_it = 0;
+	struct task_struct *t;
+
+	/* we won't get called with tasklist_lock held for writing
+	   and interrupts disabled as the cred struct in that case is
+	   init_cred
+	*/
+	if (grsec_enable_setxid && !current_is_single_threaded() &&
+	    !current_uid() && new->uid) {
+		schedule_it = 1;
+	}
+	ret = __commit_creds(new);
+	if (schedule_it) {
+		rcu_read_lock();
+		read_lock(&tasklist_lock);
+		for (t = next_thread(current); t != current;
+		     t = next_thread(t)) {
+			if (t->delayed_cred == NULL) {
+				t->delayed_cred = get_cred(new);
+				set_tsk_thread_flag(t, TIF_GRSEC_SETXID);
+				set_tsk_need_resched(t);
+			}
+		}
+		read_unlock(&tasklist_lock);
+		rcu_read_unlock();
+	}
+	return ret;
+#else
+	return __commit_creds(new);
+#endif
+}
+
 EXPORT_SYMBOL(commit_creds);
 
 /**

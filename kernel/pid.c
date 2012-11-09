@@ -33,9 +33,11 @@
 #include <linux/rculist.h>
 #include <linux/bootmem.h>
 #include <linux/hash.h>
+#include <linux/security.h>
 #include <linux/pid_namespace.h>
 #include <linux/init_task.h>
 #include <linux/syscalls.h>
+#include <linux/vs_pid.h>
 
 #define pid_hashfn(nr, ns)	\
 	hash_long((unsigned long)nr + (unsigned long)ns, pidhash_shift)
@@ -45,7 +47,7 @@ struct pid init_struct_pid = INIT_STRUCT_PID;
 
 int pid_max = PID_MAX_DEFAULT;
 
-#define RESERVED_PIDS		300
+#define RESERVED_PIDS		500
 
 int pid_max_min = RESERVED_PIDS + 1;
 int pid_max_max = PID_MAX_LIMIT;
@@ -342,7 +344,7 @@ EXPORT_SYMBOL_GPL(find_pid_ns);
 
 struct pid *find_vpid(int nr)
 {
-	return find_pid_ns(nr, current->nsproxy->pid_ns);
+	return find_pid_ns(vx_rmap_pid(nr), current->nsproxy->pid_ns);
 }
 EXPORT_SYMBOL_GPL(find_vpid);
 
@@ -402,6 +404,9 @@ void transfer_pid(struct task_struct *old, struct task_struct *new,
 struct task_struct *pid_task(struct pid *pid, enum pid_type type)
 {
 	struct task_struct *result = NULL;
+
+	if (type == PIDTYPE_REALPID)
+		type = PIDTYPE_PID;
 	if (pid) {
 		struct hlist_node *first;
 		first = rcu_dereference_check(hlist_first_rcu(&pid->tasks[type]),
@@ -418,15 +423,31 @@ EXPORT_SYMBOL(pid_task);
  */
 struct task_struct *find_task_by_pid_ns(pid_t nr, struct pid_namespace *ns)
 {
+	struct task_struct *task;
+
 	rcu_lockdep_assert(rcu_read_lock_held(),
 			   "find_task_by_pid_ns() needs rcu_read_lock()"
 			   " protection");
-	return pid_task(find_pid_ns(nr, ns), PIDTYPE_PID);
+
+	task = pid_task(find_pid_ns(vx_rmap_pid(nr), ns), PIDTYPE_PID);
+
+	if (gr_pid_is_chrooted(task))
+		return NULL;
+
+	return task;
 }
 
 struct task_struct *find_task_by_vpid(pid_t vnr)
 {
 	return find_task_by_pid_ns(vnr, current->nsproxy->pid_ns);
+}
+
+struct task_struct *find_task_by_vpid_unrestricted(pid_t vnr)
+{
+	rcu_lockdep_assert(rcu_read_lock_held(),
+			   "find_task_by_pid_ns() needs rcu_read_lock()"
+			   " protection");
+	return pid_task(find_pid_ns(vnr, current->nsproxy->pid_ns), PIDTYPE_PID);
 }
 
 struct pid *get_task_pid(struct task_struct *task, enum pid_type type)
@@ -465,7 +486,7 @@ struct pid *find_get_pid(pid_t nr)
 }
 EXPORT_SYMBOL_GPL(find_get_pid);
 
-pid_t pid_nr_ns(struct pid *pid, struct pid_namespace *ns)
+pid_t pid_unmapped_nr_ns(struct pid *pid, struct pid_namespace *ns)
 {
 	struct upid *upid;
 	pid_t nr = 0;
@@ -476,6 +497,11 @@ pid_t pid_nr_ns(struct pid *pid, struct pid_namespace *ns)
 			nr = upid->nr;
 	}
 	return nr;
+}
+
+pid_t pid_nr_ns(struct pid *pid, struct pid_namespace *ns)
+{
+	return vx_map_pid(pid_unmapped_nr_ns(pid, ns));
 }
 
 pid_t pid_vnr(struct pid *pid)
