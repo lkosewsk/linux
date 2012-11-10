@@ -20,6 +20,7 @@
 #include <linux/regset.h>
 #include <linux/tracehook.h>
 #include <linux/seccomp.h>
+#include <linux/vs_base.h>
 #include <linux/compat.h>
 #include <trace/syscall.h>
 #include <asm/segment.h>

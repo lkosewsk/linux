@@ -23,6 +23,7 @@
 #include <net/inet_connection_sock.h>
 #include <net/inet_hashtables.h>
 #include <net/secure_seq.h>
+#include <net/route.h>
 #include <net/ip.h>
 
 extern void gr_update_task_in_ip_table(struct task_struct *task, const struct inet_sock *inet);
@@ -159,6 +160,11 @@ static inline int compute_score(struct sock *sk, struct net *net,
 			if (rcv_saddr != daddr)
 				return -1;
 			score += 2;
+		} else {
+			/* block non nx_info ips */
+			if (!v4_addr_in_nx_info(sk->sk_nx_info,
+				daddr, NXA_MASK_BIND))
+				return -1;
 		}
 		if (sk->sk_bound_dev_if) {
 			if (sk->sk_bound_dev_if != dif)
@@ -175,7 +181,6 @@ static inline int compute_score(struct sock *sk, struct net *net,
  * remote address for the connection. So always assume those are both
  * wildcarded during the search since they can never be otherwise.
  */
-
 
 struct sock *__inet_lookup_listener(struct net *net,
 				    struct inet_hashinfo *hashinfo,
@@ -199,6 +204,7 @@ begin:
 			hiscore = score;
 		}
 	}
+
 	/*
 	 * if the nulls value we got at the end of this lookup is
 	 * not the expected one, we must restart lookup.

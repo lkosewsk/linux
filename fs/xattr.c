@@ -19,6 +19,7 @@
 #include <linux/module.h>
 #include <linux/fsnotify.h>
 #include <linux/audit.h>
+#include <linux/mount.h>
 #include <asm/uaccess.h>
 
 
@@ -50,7 +51,7 @@ xattr_permission(struct inode *inode, const char *name, int mask)
 	 * The trusted.* namespace can only be accessed by privileged users.
 	 */
 	if (!strncmp(name, XATTR_TRUSTED_PREFIX, XATTR_TRUSTED_PREFIX_LEN)) {
-		if (!capable(CAP_SYS_ADMIN))
+		if (!vx_capable(CAP_SYS_ADMIN, VXC_FS_TRUSTED))
 			return (mask & MAY_WRITE) ? -EPERM : -ENODATA;
 		return 0;
 	}
