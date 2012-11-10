@@ -15,6 +15,7 @@
 #include <linux/acct.h>
 #include <linux/slab.h>
 #include <linux/proc_fs.h>
+#include <linux/vserver/global.h>
 
 #define BITS_PER_PAGE		(PAGE_SIZE*8)
 
@@ -88,6 +89,7 @@ static struct pid_namespace *create_pid_namespace(struct pid_namespace *parent_p
 		goto out_free_map;
 
 	kref_init(&ns->kref);
+	atomic_inc(&vs_global_pid_ns);
 	ns->level = level;
 	ns->parent = get_pid_ns(parent_pid_ns);
 
@@ -119,6 +121,7 @@ static void destroy_pid_namespace(struct pid_namespace *ns)
 
 	for (i = 0; i < PIDMAP_ENTRIES; i++)
 		kfree(ns->pidmap[i].page);
+	atomic_dec(&vs_global_pid_ns);
 	kmem_cache_free(pid_ns_cachep, ns);
 }
 

@@ -33,6 +33,8 @@
 #include <linux/stddef.h>
 
 #include <linux/inet_diag.h>
+#include <linux/vs_network.h>
+#include <linux/vs_inet.h>
 
 static const struct inet_diag_handler **inet_diag_table;
 
@@ -119,8 +121,10 @@ static int inet_csk_diag_fill(struct sock *sk,
 
 	r->id.idiag_sport = inet->inet_sport;
 	r->id.idiag_dport = inet->inet_dport;
-	r->id.idiag_src[0] = inet->inet_rcv_saddr;
-	r->id.idiag_dst[0] = inet->inet_daddr;
+	r->id.idiag_src[0] = nx_map_sock_lback(sk->sk_nx_info,
+		inet->inet_rcv_saddr);
+	r->id.idiag_dst[0] = nx_map_sock_lback(sk->sk_nx_info,
+		inet->inet_daddr);
 
 	/* IPv6 dual-stack sockets use inet->tos for IPv4 connections,
 	 * hence this needs to be included regardless of socket family.
@@ -214,8 +218,8 @@ static int inet_twsk_diag_fill(struct inet_timewait_sock *tw,
 	r->id.idiag_cookie[1] = (u32)(((unsigned long)tw >> 31) >> 1);
 	r->id.idiag_sport     = tw->tw_sport;
 	r->id.idiag_dport     = tw->tw_dport;
-	r->id.idiag_src[0]    = tw->tw_rcv_saddr;
-	r->id.idiag_dst[0]    = tw->tw_daddr;
+	r->id.idiag_src[0]    = nx_map_sock_lback(tw->tw_nx_info, tw->tw_rcv_saddr);
+	r->id.idiag_dst[0]    = nx_map_sock_lback(tw->tw_nx_info, tw->tw_daddr);
 	r->idiag_state	      = tw->tw_substate;
 	r->idiag_timer	      = 3;
 	r->idiag_expires      = DIV_ROUND_UP(tmo * 1000, HZ);
@@ -272,6 +276,7 @@ static int inet_diag_get_exact(struct sk_buff *in_skb,
 	err = -EINVAL;
 
 	if (req->idiag_family == AF_INET) {
+		/* TODO: lback */
 		sk = inet_lookup(&init_net, hashinfo, req->id.idiag_dst[0],
 				 req->id.idiag_dport, req->id.idiag_src[0],
 				 req->id.idiag_sport, req->id.idiag_if);
@@ -514,6 +519,7 @@ static int inet_csk_diag_dump(struct sock *sk,
 		} else
 #endif
 		{
+			/* TODO: lback */
 			entry.saddr = &inet->inet_rcv_saddr;
 			entry.daddr = &inet->inet_daddr;
 		}
@@ -552,6 +558,7 @@ static int inet_twsk_diag_dump(struct inet_timewait_sock *tw,
 		} else
 #endif
 		{
+			/* TODO: lback */
 			entry.saddr = &tw->tw_rcv_saddr;
 			entry.daddr = &tw->tw_daddr;
 		}
@@ -598,8 +605,8 @@ static int inet_diag_fill_req(struct sk_buff *skb, struct sock *sk,
 
 	r->id.idiag_sport = inet->inet_sport;
 	r->id.idiag_dport = ireq->rmt_port;
-	r->id.idiag_src[0] = ireq->loc_addr;
-	r->id.idiag_dst[0] = ireq->rmt_addr;
+	r->id.idiag_src[0] = nx_map_sock_lback(sk->sk_nx_info, ireq->loc_addr);
+	r->id.idiag_dst[0] = nx_map_sock_lback(sk->sk_nx_info, ireq->rmt_addr);
 	r->idiag_expires = jiffies_to_msecs(tmo);
 	r->idiag_rqueue = 0;
 	r->idiag_wqueue = 0;
@@ -670,6 +677,7 @@ static int inet_diag_dump_reqs(struct sk_buff *skb, struct sock *sk,
 				continue;
 
 			if (bc) {
+				/* TODO: lback */
 				entry.saddr =
 #if defined(CONFIG_IPV6) || defined (CONFIG_IPV6_MODULE)
 					(entry.family == AF_INET6) ?
@@ -740,6 +748,8 @@ static int inet_diag_dump(struct sk_buff *skb, struct netlink_callback *cb)
 			sk_nulls_for_each(sk, node, &ilb->head) {
 				struct inet_sock *inet = inet_sk(sk);
 
+				if (!nx_check(sk->sk_nid, VS_WATCH_P | VS_IDENT))
+					continue;
 				if (num < s_num) {
 					num++;
 					continue;
@@ -806,6 +816,8 @@ skip_listen_ht:
 		sk_nulls_for_each(sk, node, &head->chain) {
 			struct inet_sock *inet = inet_sk(sk);
 
+			if (!nx_check(sk->sk_nid, VS_WATCH_P | VS_IDENT))
+				continue;
 			if (num < s_num)
 				goto next_normal;
 			if (!(r->idiag_states & (1 << sk->sk_state)))
@@ -830,6 +842,8 @@ next_normal:
 			inet_twsk_for_each(tw, node,
 				    &head->twchain) {
 
+				if (!nx_check(tw->tw_nid, VS_WATCH_P | VS_IDENT))
+					continue;
 				if (num < s_num)
 					goto next_dying;
 				if (r->id.idiag_sport != tw->tw_sport &&
