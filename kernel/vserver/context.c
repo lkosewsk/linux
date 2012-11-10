@@ -130,7 +130,7 @@ static struct vx_info *__alloc_vx_info(xid_t xid)
 
 		// filesystem
 		spin_lock(&init_fs.lock);
-		init_fs.users++;
+		atomic_inc(&init_fs.users);
 		spin_unlock(&init_fs.lock);
 		space->vx_fs = &init_fs;
 
@@ -213,7 +213,7 @@ static void __shutdown_vx_info(struct vx_info *vxi)
 
 		fs = xchg(&space->vx_fs, NULL);
 		spin_lock(&fs->lock);
-		kill = !--fs->users;
+		kill = atomic_dec_and_test(&fs->users);
 		spin_unlock(&fs->lock);
 		if (kill)
 			free_fs_struct(fs);
